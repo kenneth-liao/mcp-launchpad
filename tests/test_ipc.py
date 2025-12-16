@@ -170,15 +170,77 @@ class TestCreateIPCServer:
     def test_creates_appropriate_server(self, monkeypatch):
         """Test that factory creates platform-appropriate server."""
         monkeypatch.setenv("MCPL_SESSION_ID", "test-factory")
-        
-        async def handler(msg):
+
+        async def handler(msg: IPCMessage) -> IPCMessage:
             return IPCMessage(action="response", payload={})
-        
+
         server = create_ipc_server(handler)
-        
+
         if IS_WINDOWS:
             from mcp_launchpad.ipc import WindowsIPCServer
             assert isinstance(server, WindowsIPCServer)
         else:
             assert isinstance(server, UnixIPCServer)
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="Unix-specific tests")
+class TestIPCConnectionUnix:
+    """Tests for Unix socket connection."""
+
+    @pytest.mark.asyncio
+    async def test_connect_and_communicate(self):
+        """Test connecting to a Unix socket server and communicating."""
+        import tempfile
+
+        socket_path = Path(tempfile.gettempdir()) / "mcpl-test-connect.sock"
+
+        async def handler(msg: IPCMessage) -> IPCMessage:
+            return IPCMessage(action="pong", payload={"echo": msg.action})
+
+        server = UnixIPCServer(socket_path, handler)
+        await server.start()
+
+        try:
+            # Connect directly
+            reader, writer = await asyncio.open_unix_connection(str(socket_path))
+
+            # Send a message
+            await write_message(writer, IPCMessage(action="ping", payload={}))
+            response = await read_message(reader)
+            assert response is not None
+            assert response.action == "pong"
+            assert response.payload["echo"] == "ping"
+
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            await server.stop()
+
+
+class TestIPCMessageEdgeCases:
+    """Edge case tests for IPCMessage."""
+
+    def test_large_payload(self):
+        """Test handling large payloads."""
+        large_data = {"data": "x" * 100000}
+        message = IPCMessage(action="large", payload=large_data)
+        data = message.to_bytes()
+        restored = IPCMessage.from_bytes(data[HEADER_SIZE:])
+        assert restored.payload == large_data
+
+    def test_special_characters_in_payload(self):
+        """Test handling special characters."""
+        special = {"chars": "!@#$%^&*()_+-=[]{}|;':\",./<>?`~"}
+        message = IPCMessage(action="special", payload=special)
+        data = message.to_bytes()
+        restored = IPCMessage.from_bytes(data[HEADER_SIZE:])
+        assert restored.payload == special
+
+    def test_nested_payload(self):
+        """Test deeply nested payloads."""
+        nested = {"level1": {"level2": {"level3": {"level4": "deep"}}}}
+        message = IPCMessage(action="nested", payload=nested)
+        data = message.to_bytes()
+        restored = IPCMessage.from_bytes(data[HEADER_SIZE:])
+        assert restored.payload == nested
 

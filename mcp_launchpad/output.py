@@ -37,7 +37,7 @@ def format_error_json(
     )
 
 
-def output_json(data: Any, success: bool = True):
+def output_json(data: Any, success: bool = True) -> None:
     """Output data as JSON to stdout."""
     click.echo(format_json(data, success))
 
@@ -46,18 +46,18 @@ def output_error_json(
     error: Exception,
     error_type: str | None = None,
     help_text: str | None = None,
-):
+) -> None:
     """Output an error as JSON to stdout."""
     click.echo(format_error_json(error, error_type, help_text))
     sys.exit(1)
 
 
-def output_human(message: str):
+def output_human(message: str) -> None:
     """Output a human-readable message."""
     click.echo(message)
 
 
-def output_error_human(error: Exception, help_text: str | None = None):
+def output_error_human(error: Exception, help_text: str | None = None) -> None:
     """Output an error in human-readable format."""
     click.secho(f"Error: {error}", fg="red", err=True)
     if help_text:
@@ -71,7 +71,7 @@ class OutputHandler:
     def __init__(self, json_mode: bool = False):
         self.json_mode = json_mode
 
-    def success(self, data: Any, human_message: str | None = None):
+    def success(self, data: Any, human_message: str | None = None) -> None:
         """Output success response."""
         if self.json_mode:
             output_json(data)
@@ -86,14 +86,14 @@ class OutputHandler:
         error: Exception,
         error_type: str | None = None,
         help_text: str | None = None,
-    ):
+    ) -> None:
         """Output error response."""
         if self.json_mode:
             output_error_json(error, error_type, help_text)
         else:
             output_error_human(error, help_text)
 
-    def table(self, headers: list[str], rows: list[list[str]]):
+    def table(self, headers: list[str], rows: list[list[str]]) -> None:
         """Output a table (human mode only, JSON mode outputs raw data)."""
         if self.json_mode:
             # Convert to list of dicts for JSON

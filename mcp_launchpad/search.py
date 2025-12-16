@@ -60,7 +60,7 @@ class ToolSearcher:
         self._bm25: BM25Okapi | None = None
         self._corpus: list[list[str]] | None = None
 
-    def _build_bm25_index(self):
+    def _build_bm25_index(self) -> None:
         """Build BM25 index lazily."""
         if self._bm25 is None:
             self._corpus = [tokenize(build_search_text(t)) for t in self.tools]

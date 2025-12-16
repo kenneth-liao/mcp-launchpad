@@ -1,33 +1,36 @@
 """CLI entry point for MCP Launchpad."""
 
+from __future__ import annotations
+
 import asyncio
 import json
+import logging
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import click
 
 from . import __version__
 from .cache import ToolCache
-from .config import load_config
+from .config import Config, load_config
 from .connection import ConnectionManager
 from .output import OutputHandler
 from .search import SearchMethod, ToolSearcher
 from .session import SessionClient
 
-
-# Global options
-pass_output = click.make_pass_decorator(OutputHandler)
+# Logger for CLI
+logger = logging.getLogger("mcpl")
 
 
 @click.group()
 @click.option("--json", "json_mode", is_flag=True, help="Output in JSON format")
 @click.option("--config", "config_path", type=click.Path(exists=True), help="Path to MCP config file")
 @click.option("--env-file", "env_path", type=click.Path(exists=True), help="Path to .env file")
+@click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
 @click.version_option(version=__version__)
 @click.pass_context
-def main(ctx: click.Context, json_mode: bool, config_path: str | None, env_path: str | None):
+def main(ctx: click.Context, json_mode: bool, config_path: str | None, env_path: str | None, verbose: bool) -> None:
     """MCP Launchpad - Efficiently discover and execute MCP server tools."""
     ctx.ensure_object(dict)
     ctx.obj["json_mode"] = json_mode
@@ -35,20 +38,31 @@ def main(ctx: click.Context, json_mode: bool, config_path: str | None, env_path:
     ctx.obj["env_path"] = Path(env_path) if env_path else None
     ctx.obj["output"] = OutputHandler(json_mode)
 
+    # Configure logging based on verbosity
+    if verbose:
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        )
+    else:
+        logging.basicConfig(level=logging.WARNING)
 
-def get_config(ctx: click.Context):
+
+def get_config(ctx: click.Context) -> Config | NoReturn:
     """Get config from context, handling errors."""
     output: OutputHandler = ctx.obj["output"]
     try:
         return load_config(ctx.obj["config_path"], ctx.obj["env_path"])
     except FileNotFoundError as e:
         output.error(e, help_text=str(e))
+        raise SystemExit(1)  # Never reached due to sys.exit in output.error
     except json.JSONDecodeError as e:
         output.error(
             e,
             error_type="ConfigParseError",
             help_text="The config file contains invalid JSON. Check for syntax errors.",
         )
+        raise SystemExit(1)  # Never reached due to sys.exit in output.error
 
 
 @main.command()
@@ -59,7 +73,7 @@ def get_config(ctx: click.Context):
 @click.option("--schema", "-s", is_flag=True, help="Include full input schema in results")
 @click.option("--first", "-1", is_flag=True, help="Return only the top result with full details")
 @click.pass_context
-def search(ctx: click.Context, query: str, method: str, limit: int, refresh: bool, schema: bool, first: bool):
+def search(ctx: click.Context, query: str, method: str, limit: int, refresh: bool, schema: bool, first: bool) -> None:
     """Search for tools matching a query."""
     output: OutputHandler = ctx.obj["output"]
     config = get_config(ctx)
@@ -164,7 +178,7 @@ def search(ctx: click.Context, query: str, method: str, limit: int, refresh: boo
 @click.argument("tool")
 @click.option("--example", "-e", is_flag=True, help="Include an example call command")
 @click.pass_context
-def inspect(ctx: click.Context, server: str, tool: str, example: bool):
+def inspect(ctx: click.Context, server: str, tool: str, example: bool) -> None:
     """Get the full definition of a specific tool."""
     output: OutputHandler = ctx.obj["output"]
     config = get_config(ctx)
@@ -203,15 +217,17 @@ def inspect(ctx: click.Context, server: str, tool: str, example: bool):
 @click.argument("tool")
 @click.argument("arguments", required=False)
 @click.option("--stdin", is_flag=True, help="Read arguments from stdin")
+@click.option("--no-daemon", is_flag=True, help="Bypass daemon and connect directly (slower but more reliable)")
 @click.pass_context
-def call(ctx: click.Context, server: str, tool: str, arguments: str | None, stdin: bool):
+def call(ctx: click.Context, server: str, tool: str, arguments: str | None, stdin: bool, no_daemon: bool) -> None:
     """Execute a tool on a server.
 
     ARGUMENTS should be a JSON object with the tool parameters.
     Use --stdin to read arguments from stdin for large payloads.
 
-    Uses a persistent session daemon to maintain stateful connections
-    to MCP servers across multiple calls.
+    By default, uses a persistent session daemon to maintain stateful connections
+    to MCP servers across multiple calls. Use --no-daemon to bypass the daemon
+    and connect directly (slower but more reliable for troubleshooting).
     """
     output: OutputHandler = ctx.obj["output"]
     config = get_config(ctx)
@@ -221,7 +237,7 @@ def call(ctx: click.Context, server: str, tool: str, arguments: str | None, stdi
         arguments = sys.stdin.read()
 
     if not arguments:
-        args_dict = {}
+        args_dict: dict[str, Any] = {}
     else:
         try:
             args_dict = json.loads(arguments)
@@ -236,13 +252,34 @@ def call(ctx: click.Context, server: str, tool: str, arguments: str | None, stdi
             )
             return
 
-    # Call the tool via session daemon (maintains persistent connections)
-    session = SessionClient(config)
     try:
-        result = asyncio.run(session.call_tool(server, tool, args_dict))
+        if no_daemon:
+            # Direct connection without daemon
+            logger.debug(f"Calling {server}/{tool} directly (no daemon)")
+            manager = ConnectionManager(config)
+            result = asyncio.run(manager.call_tool(server, tool, args_dict))
 
-        # Result is already extracted by the daemon
-        result_data = result.get("result", result)
+            # Extract content from MCP result
+            if hasattr(result, "content"):
+                content = []
+                for item in result.content:
+                    if hasattr(item, "text"):
+                        content.append(item.text)
+                    elif hasattr(item, "data"):
+                        content.append(item.data)
+                    else:
+                        content.append(str(item))
+                result_data: Any = content[0] if len(content) == 1 else content
+            else:
+                result_data = result
+        else:
+            # Call the tool via session daemon (maintains persistent connections)
+            logger.debug(f"Calling {server}/{tool} via daemon")
+            session = SessionClient(config)
+            result = asyncio.run(session.call_tool(server, tool, args_dict))
+            # Result is already extracted by the daemon
+            result_data = result.get("result", result)
+
         output.success({"result": result_data})
     except Exception as e:
         output.error(e)
@@ -252,7 +289,7 @@ def call(ctx: click.Context, server: str, tool: str, arguments: str | None, stdi
 @click.argument("server", required=False)
 @click.option("--refresh", is_flag=True, help="Refresh the tool cache")
 @click.pass_context
-def list_cmd(ctx: click.Context, server: str | None, refresh: bool):
+def list_cmd(ctx: click.Context, server: str | None, refresh: bool) -> None:
     """List servers and their tools.
 
     Without arguments, lists all configured servers.
@@ -300,11 +337,11 @@ def list_cmd(ctx: click.Context, server: str | None, refresh: bool):
     else:
         # List all servers
         tools = cache.get_tools()
-        server_tool_counts = {}
+        server_tool_counts: dict[str, int] = {}
         for t in tools:
             server_tool_counts[t.server] = server_tool_counts.get(t.server, 0) + 1
 
-        servers_data = []
+        servers_data: list[dict[str, Any]] = []
         for name in config.servers:
             tool_count = server_tool_counts.get(name, 0)
             status = "cached" if tool_count > 0 else "not cached"
@@ -333,14 +370,14 @@ def list_cmd(ctx: click.Context, server: str | None, refresh: bool):
 
 @main.group()
 @click.pass_context
-def session(ctx: click.Context):
+def session(ctx: click.Context) -> None:
     """Manage the session daemon for persistent MCP connections."""
     pass
 
 
 @session.command("status")
 @click.pass_context
-def session_status(ctx: click.Context):
+def session_status(ctx: click.Context) -> None:
     """Show the status of the session daemon and connected servers."""
     output: OutputHandler = ctx.obj["output"]
     config = get_config(ctx)
@@ -383,7 +420,7 @@ def session_status(ctx: click.Context):
 
 @session.command("stop")
 @click.pass_context
-def session_stop(ctx: click.Context):
+def session_stop(ctx: click.Context) -> None:
     """Stop the session daemon."""
     output: OutputHandler = ctx.obj["output"]
     config = get_config(ctx)

@@ -53,7 +53,7 @@ class ToolCache:
         self.index_path = self.cache_dir / "tool_index.json"
         self.metadata_path = self.cache_dir / "index_metadata.json"
 
-    def _ensure_cache_dir(self):
+    def _ensure_cache_dir(self) -> None:
         """Ensure cache directory exists."""
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -73,7 +73,7 @@ class ToolCache:
         except (json.JSONDecodeError, KeyError):
             return None
 
-    def _save_metadata(self, metadata: CacheMetadata):
+    def _save_metadata(self, metadata: CacheMetadata) -> None:
         """Save cache metadata."""
         self._ensure_cache_dir()
         with open(self.metadata_path, "w") as f:
@@ -90,7 +90,7 @@ class ToolCache:
         except (json.JSONDecodeError, KeyError):
             return []
 
-    def _save_tools(self, tools: list[ToolInfo]):
+    def _save_tools(self, tools: list[ToolInfo]) -> None:
         """Save tools to cache."""
         self._ensure_cache_dir()
         with open(self.index_path, "w") as f:

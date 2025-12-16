@@ -17,11 +17,11 @@ from .platform import (
     is_process_alive,
 )
 
-# How long to wait for daemon to start (seconds)
-DAEMON_START_TIMEOUT = 30
+# How long to wait for daemon to start (seconds) - configurable via env
+DAEMON_START_TIMEOUT = int(os.environ.get("MCPL_DAEMON_START_TIMEOUT", "30"))
 
 # How long to wait between connection attempts (seconds)
-DAEMON_CONNECT_RETRY_DELAY = 0.2
+DAEMON_CONNECT_RETRY_DELAY = float(os.environ.get("MCPL_DAEMON_CONNECT_RETRY_DELAY", "0.2"))
 
 
 class SessionClient:
@@ -51,7 +51,8 @@ class SessionClient:
         response = await self._send_request(
             IPCMessage(action="list_tools", payload={"server": server_name})
         )
-        return response.payload.get("tools", [])
+        tools: list[dict[str, Any]] = response.payload.get("tools", [])
+        return tools
 
     async def get_status(self) -> dict[str, Any]:
         """Get daemon status."""

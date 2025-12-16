@@ -1,14 +1,22 @@
 """Cross-platform IPC for daemon communication."""
 
+from __future__ import annotations
+
 import asyncio
 import json
 import struct
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Callable, Awaitable
 
 from .platform import IS_WINDOWS, get_socket_path
+
+if TYPE_CHECKING:
+    pass
+
+# Type alias for IPC message handlers
+IPCHandler = Callable[["IPCMessage"], Awaitable["IPCMessage"]]
 
 
 # Message format: 4-byte length prefix + JSON payload
@@ -71,7 +79,7 @@ class IPCServer(ABC):
 class UnixIPCServer(IPCServer):
     """Unix socket-based IPC server."""
 
-    def __init__(self, socket_path: Path, handler):
+    def __init__(self, socket_path: Path, handler: IPCHandler) -> None:
         self.socket_path = socket_path
         self.handler = handler
         self.server: asyncio.Server | None = None
@@ -109,13 +117,17 @@ class UnixIPCServer(IPCServer):
 
 
 class WindowsIPCServer(IPCServer):
-    """Windows named pipe-based IPC server."""
+    """Windows named pipe-based IPC server.
 
-    def __init__(self, pipe_name: str, handler):
+    Note: Windows support is experimental. The named pipe implementation
+    may have limitations compared to Unix sockets.
+    """
+
+    def __init__(self, pipe_name: str, handler: IPCHandler) -> None:
         self.pipe_name = pipe_name
         self.handler = handler
         self._running = False
-        self._server_task: asyncio.Task | None = None
+        self._server_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         """Start listening on named pipe."""
@@ -134,8 +146,7 @@ class WindowsIPCServer(IPCServer):
 
     async def _run_server(self) -> None:
         """Main server loop for Windows named pipes."""
-        import ctypes
-        from ctypes import wintypes
+        import ctypes  # noqa: PLC0415
 
         PIPE_ACCESS_DUPLEX = 0x00000003
         PIPE_TYPE_MESSAGE = 0x00000004
@@ -145,7 +156,7 @@ class WindowsIPCServer(IPCServer):
         BUFFER_SIZE = 65536
         INVALID_HANDLE_VALUE = -1
 
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
 
         while self._running:
             # Create named pipe
@@ -174,9 +185,9 @@ class WindowsIPCServer(IPCServer):
             finally:
                 kernel32.CloseHandle(pipe_handle)
 
-    async def _handle_pipe_client(self, kernel32, pipe_handle) -> None:
+    async def _handle_pipe_client(self, kernel32: Any, pipe_handle: Any) -> None:
         """Handle a client connected via named pipe."""
-        import ctypes
+        import ctypes  # noqa: PLC0415
 
         BUFFER_SIZE = 65536
 
@@ -243,16 +254,18 @@ async def _connect_unix(socket_path: Path) -> tuple[asyncio.StreamReader, asynci
 
 
 async def _connect_windows(pipe_name: str) -> tuple[asyncio.StreamReader, asyncio.StreamWriter] | None:
-    """Connect to Windows named pipe."""
-    import ctypes
-    from ctypes import wintypes
+    """Connect to Windows named pipe.
+
+    Note: Windows support is experimental.
+    """
+    import ctypes  # noqa: PLC0415
 
     GENERIC_READ = 0x80000000
     GENERIC_WRITE = 0x40000000
     OPEN_EXISTING = 3
     INVALID_HANDLE_VALUE = -1
 
-    kernel32 = ctypes.windll.kernel32
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
 
     # Try to open the pipe
     handle = kernel32.CreateFileW(
@@ -274,22 +287,23 @@ async def _connect_windows(pipe_name: str) -> tuple[asyncio.StreamReader, asynci
     return _create_pipe_streams(kernel32, handle)
 
 
-def _create_pipe_streams(kernel32, handle) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-    """Create asyncio streams from a Windows pipe handle."""
-    # Create a simple wrapper that provides read/write operations
-    # This is a simplified implementation
-    reader = asyncio.StreamReader()
-    protocol = asyncio.StreamReaderProtocol(reader)
+def _create_pipe_streams(kernel32: Any, handle: Any) -> tuple[asyncio.StreamReader, Any]:
+    """Create asyncio streams from a Windows pipe handle.
 
-    # For Windows, we'll use a different approach in the actual implementation
-    # This placeholder shows the interface we need
+    Note: This is a simplified implementation for Windows named pipes.
+    Windows support is experimental and may have limitations.
+    """
+    # Create a simple wrapper that provides read/write operations
+    reader = asyncio.StreamReader()
+
+    # For Windows, we use a simplified writer that wraps the pipe handle
     class PipeWriter:
-        def __init__(self, kernel32, handle):
+        def __init__(self, kernel32: Any, handle: Any) -> None:
             self.kernel32 = kernel32
             self.handle = handle
 
         def write(self, data: bytes) -> None:
-            import ctypes
+            import ctypes  # noqa: PLC0415
             bytes_written = ctypes.c_ulong(0)
             self.kernel32.WriteFile(
                 self.handle, data, len(data), ctypes.byref(bytes_written), None
@@ -304,10 +318,10 @@ def _create_pipe_streams(kernel32, handle) -> tuple[asyncio.StreamReader, asynci
         async def wait_closed(self) -> None:
             pass
 
-    return reader, PipeWriter(kernel32, handle)  # type: ignore
+    return reader, PipeWriter(kernel32, handle)
 
 
-def create_ipc_server(handler) -> IPCServer:
+def create_ipc_server(handler: IPCHandler) -> IPCServer:
     """Create the appropriate IPC server for the current platform."""
     socket_path = get_socket_path()
 

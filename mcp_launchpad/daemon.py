@@ -1,37 +1,38 @@
 """Session daemon for maintaining persistent MCP server connections."""
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import os
 import signal
 import sys
 import tempfile
-from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO, cast
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from .config import Config, load_config
 from .ipc import IPCMessage, create_ipc_server
-from .platform import get_parent_pid, get_pid_file_path, is_process_alive
+from .platform import IS_WINDOWS, get_parent_pid, get_pid_file_path, is_process_alive
 
 # Logging configuration for daemon
 logger = logging.getLogger("mcpl.daemon")
 
 # How often to check if parent process is still alive (seconds)
-PARENT_CHECK_INTERVAL = 5
+PARENT_CHECK_INTERVAL = int(os.environ.get("MCPL_PARENT_CHECK_INTERVAL", "5"))
 
-# Connection timeout for MCP servers (seconds)
-CONNECTION_TIMEOUT = 30
+# Connection timeout for MCP servers (seconds) - configurable via env
+CONNECTION_TIMEOUT = int(os.environ.get("MCPL_CONNECTION_TIMEOUT", "30"))
 
 # Delay before retrying a failed server connection (seconds)
-RECONNECT_DELAY = 5
+RECONNECT_DELAY = int(os.environ.get("MCPL_RECONNECT_DELAY", "5"))
 
 # Maximum reconnection attempts before giving up
-MAX_RECONNECT_ATTEMPTS = 3
+MAX_RECONNECT_ATTEMPTS = int(os.environ.get("MCPL_MAX_RECONNECT_ATTEMPTS", "3"))
 
 
 @dataclass
@@ -60,15 +61,18 @@ class DaemonState:
 class Daemon:
     """The session daemon that maintains persistent MCP connections."""
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config) -> None:
         self.state = DaemonState(config=config, parent_pid=get_parent_pid())
         self._ipc_server = create_ipc_server(self._handle_request)
-        self._connection_tasks: dict[str, asyncio.Task] = {}
+        self._connection_tasks: dict[str, asyncio.Task[None]] = {}
         self._contexts: dict[str, Any] = {}  # Store context managers
 
     async def start(self) -> None:
         """Start the daemon."""
         logger.info(f"Daemon starting, monitoring parent PID {self.state.parent_pid}")
+
+        # Set up signal handlers for graceful shutdown
+        self._setup_signal_handlers()
 
         # Write PID file
         self._write_pid_file()
@@ -90,6 +94,24 @@ class Daemon:
         finally:
             parent_monitor.cancel()
             await self._shutdown()
+
+    def _setup_signal_handlers(self) -> None:
+        """Set up signal handlers for graceful shutdown."""
+        loop = asyncio.get_running_loop()
+
+        def handle_signal(sig: signal.Signals) -> None:
+            logger.info(f"Received signal {sig.name}, initiating shutdown")
+            self.state.running = False
+
+        # Register signal handlers
+        if not IS_WINDOWS:
+            # Unix signals
+            for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+                loop.add_signal_handler(sig, handle_signal, sig)
+        else:
+            # Windows: only SIGTERM and SIGINT are supported
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                signal.signal(sig, lambda s, f: handle_signal(signal.Signals(s)))
 
     async def _connect_all_servers(self) -> None:
         """Connect to all configured MCP servers."""
@@ -114,16 +136,18 @@ class Daemon:
             )
 
             # Create stderr capture file
-            stderr_file = tempfile.NamedTemporaryFile(
+            stderr_tmp = tempfile.NamedTemporaryFile(
                 mode="w+", suffix=f".{server_name}.stderr", delete=False
             )
+            # Cast to TextIO for type checker
+            stderr_file = cast(TextIO, stderr_tmp)
 
             server_state = self.state.servers.get(server_name)
             if not server_state:
-                server_state = ServerState(name=server_name, stderr_file=stderr_file)
+                server_state = ServerState(name=server_name, stderr_file=stderr_tmp)
                 self.state.servers[server_name] = server_state
             else:
-                server_state.stderr_file = stderr_file
+                server_state.stderr_file = stderr_tmp
                 server_state.error = None
 
             try:
@@ -243,6 +267,9 @@ class Daemon:
         """Call a tool on the specified server."""
         server_state = await self._ensure_server_connected(server_name)
 
+        if server_state.session is None:
+            raise RuntimeError(f"Server '{server_name}' session is not available")
+
         result = await server_state.session.call_tool(tool_name, arguments)
 
         # Extract content from MCP result
@@ -264,6 +291,9 @@ class Daemon:
     async def _list_tools(self, server_name: str) -> dict[str, Any]:
         """List tools from the specified server."""
         server_state = await self._ensure_server_connected(server_name)
+
+        if server_state.session is None:
+            raise RuntimeError(f"Server '{server_name}' session is not available")
 
         result = await server_state.session.list_tools()
         tools = [

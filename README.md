@@ -7,7 +7,7 @@ A lightweight CLI for efficiently discovering and executing tools from multiple 
 - **Unified Tool Discovery** - Search across all configured MCP servers with BM25, regex, or exact matching
 - **Persistent Connections** - Session daemon maintains server connections for faster repeated calls
 - **Auto-Configuration** - Reads Claude Desktop's `.mcp.json` format for seamless integration
-- **Cross-Platform** - Works on macOS, Linux, and Windows
+- **Cross-Platform** - Works on macOS, Linux, and Windows (experimental)
 - **JSON Mode** - Machine-readable output for scripting and automation
 
 ## Installation
@@ -94,6 +94,9 @@ mcpl call filesystem read_file '{"path": "/tmp/test.txt"}'
 
 # Read arguments from stdin for large payloads
 cat args.json | mcpl call github create_issue --stdin
+
+# Bypass daemon for troubleshooting (slower but more reliable)
+mcpl call github list_issues '{}' --no-daemon
 ```
 
 ### `mcpl inspect <server> <tool>`
@@ -167,6 +170,36 @@ The daemon:
 - Shuts down automatically when the parent terminal closes
 - Can be manually stopped with `mcpl session stop`
 
+If you encounter issues with the daemon, use `--no-daemon` flag to bypass it and connect directly.
+
+## Advanced Configuration
+
+### Environment Variables
+
+Timeouts and daemon behavior can be configured via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MCPL_CONNECTION_TIMEOUT` | `30` | Server connection timeout (seconds) |
+| `MCPL_DAEMON_START_TIMEOUT` | `30` | Max time to wait for daemon startup (seconds) |
+| `MCPL_RECONNECT_DELAY` | `5` | Delay between reconnection attempts (seconds) |
+| `MCPL_MAX_RECONNECT_ATTEMPTS` | `3` | Max reconnection attempts before giving up |
+
+Example:
+```bash
+export MCPL_CONNECTION_TIMEOUT=60  # 60 second timeout
+mcpl call slow-server long_running_tool '{}'
+```
+
+## Platform Notes
+
+### Windows (Experimental)
+
+Windows support uses named pipes for IPC communication. While functional, it may have limitations compared to Unix sockets on macOS/Linux. If you encounter issues on Windows:
+
+1. Use `--no-daemon` flag to bypass the session daemon
+2. Report issues at https://github.com/kenneth-liao/mcp-launchpad/issues
+
 ## Development
 
 ```bash
@@ -179,7 +212,7 @@ uv run pytest
 # Run tests with coverage
 uv run pytest --cov=mcp_launchpad
 
-# Type checking (if mypy is added)
+# Type checking
 uv run mypy mcp_launchpad
 ```
 

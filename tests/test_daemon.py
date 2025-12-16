@@ -163,11 +163,183 @@ class TestDaemon:
         """Test handling unknown action."""
         with patch("mcp_launchpad.daemon.get_parent_pid", return_value=12345):
             daemon = Daemon(mock_config)
-            
+
             message = IPCMessage(action="unknown_action", payload={})
-            
+
             response = await daemon._handle_request(message)
-            
+
             assert response.action == "error"
             assert "unknown" in response.payload["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_handle_request_exception(self, mock_config):
+        """Test handling exception during request processing."""
+        with patch("mcp_launchpad.daemon.get_parent_pid", return_value=12345):
+            daemon = Daemon(mock_config)
+
+            # Call tool on non-existent server should raise
+            message = IPCMessage(
+                action="call_tool",
+                payload={"server": "nonexistent", "tool": "test", "arguments": {}}
+            )
+
+            response = await daemon._handle_request(message)
+
+            assert response.action == "error"
+            assert "error" in response.payload
+
+    @pytest.mark.asyncio
+    async def test_ensure_server_connected_not_found(self, mock_config):
+        """Test _ensure_server_connected with non-existent server."""
+        with patch("mcp_launchpad.daemon.get_parent_pid", return_value=12345):
+            daemon = Daemon(mock_config)
+
+            with pytest.raises(ValueError, match="not found"):
+                await daemon._ensure_server_connected("nonexistent-server")
+
+    @pytest.mark.asyncio
+    async def test_ensure_server_connected_with_error(self, mock_config):
+        """Test _ensure_server_connected when server has an error."""
+        with patch("mcp_launchpad.daemon.get_parent_pid", return_value=12345):
+            daemon = Daemon(mock_config)
+
+            # Add server state with error
+            daemon.state.servers["test-server"] = ServerState(
+                name="test-server",
+                connected=False,
+                error="Connection refused"
+            )
+
+            with pytest.raises(RuntimeError, match="Connection refused"):
+                await daemon._ensure_server_connected("test-server")
+
+    def test_get_status(self, mock_config):
+        """Test _get_status method."""
+        with patch("mcp_launchpad.daemon.get_parent_pid", return_value=12345):
+            daemon = Daemon(mock_config)
+
+            daemon.state.servers["server1"] = ServerState(
+                name="server1", connected=True
+            )
+            daemon.state.servers["server2"] = ServerState(
+                name="server2", connected=False, error="Failed"
+            )
+
+            status = daemon._get_status()
+
+            assert status["success"] is True
+            assert status["parent_pid"] == 12345
+            assert status["running"] is True
+            assert status["servers"]["server1"]["connected"] is True
+            assert status["servers"]["server2"]["connected"] is False
+            assert status["servers"]["server2"]["error"] == "Failed"
+
+    def test_write_and_remove_pid_file(self, mock_config, tmp_path):
+        """Test PID file operations."""
+        pid_file = tmp_path / "test.pid"
+
+        with patch("mcp_launchpad.daemon.get_parent_pid", return_value=12345):
+            with patch("mcp_launchpad.daemon.get_pid_file_path", return_value=pid_file):
+                daemon = Daemon(mock_config)
+
+                # Write PID file
+                daemon._write_pid_file()
+                assert pid_file.exists()
+                assert pid_file.read_text() == str(os.getpid())
+
+                # Remove PID file
+                daemon._remove_pid_file()
+                assert not pid_file.exists()
+
+    @pytest.mark.asyncio
+    async def test_call_tool_extracts_text_content(self, mock_config):
+        """Test that _call_tool extracts text content from result."""
+        with patch("mcp_launchpad.daemon.get_parent_pid", return_value=12345):
+            daemon = Daemon(mock_config)
+
+            mock_session = MagicMock()
+            mock_item = MagicMock()
+            mock_item.text = "extracted text"
+            delattr(mock_item, "data") if hasattr(mock_item, "data") else None
+            mock_result = MagicMock()
+            mock_result.content = [mock_item]
+            mock_session.call_tool = AsyncMock(return_value=mock_result)
+
+            daemon.state.servers["test-server"] = ServerState(
+                name="test-server",
+                session=mock_session,
+                connected=True,
+            )
+
+            result = await daemon._call_tool("test-server", "tool", {})
+
+            assert result["result"] == "extracted text"
+
+    @pytest.mark.asyncio
+    async def test_call_tool_extracts_data_content(self, mock_config):
+        """Test that _call_tool extracts data content from result."""
+        with patch("mcp_launchpad.daemon.get_parent_pid", return_value=12345):
+            daemon = Daemon(mock_config)
+
+            mock_session = MagicMock()
+            mock_item = MagicMock(spec=["data"])
+            mock_item.data = {"key": "value"}
+            mock_result = MagicMock()
+            mock_result.content = [mock_item]
+            mock_session.call_tool = AsyncMock(return_value=mock_result)
+
+            daemon.state.servers["test-server"] = ServerState(
+                name="test-server",
+                session=mock_session,
+                connected=True,
+            )
+
+            result = await daemon._call_tool("test-server", "tool", {})
+
+            assert result["result"] == {"key": "value"}
+
+    @pytest.mark.asyncio
+    async def test_call_tool_multiple_content_items(self, mock_config):
+        """Test _call_tool with multiple content items returns list."""
+        with patch("mcp_launchpad.daemon.get_parent_pid", return_value=12345):
+            daemon = Daemon(mock_config)
+
+            mock_session = MagicMock()
+            mock_item1 = MagicMock()
+            mock_item1.text = "item1"
+            mock_item2 = MagicMock()
+            mock_item2.text = "item2"
+            mock_result = MagicMock()
+            mock_result.content = [mock_item1, mock_item2]
+            mock_session.call_tool = AsyncMock(return_value=mock_result)
+
+            daemon.state.servers["test-server"] = ServerState(
+                name="test-server",
+                session=mock_session,
+                connected=True,
+            )
+
+            result = await daemon._call_tool("test-server", "tool", {})
+
+            assert result["result"] == ["item1", "item2"]
+
+    @pytest.mark.asyncio
+    async def test_call_tool_no_content_attribute(self, mock_config):
+        """Test _call_tool when result has no content attribute."""
+        with patch("mcp_launchpad.daemon.get_parent_pid", return_value=12345):
+            daemon = Daemon(mock_config)
+
+            mock_session = MagicMock()
+            mock_result = "plain result"
+            mock_session.call_tool = AsyncMock(return_value=mock_result)
+
+            daemon.state.servers["test-server"] = ServerState(
+                name="test-server",
+                session=mock_session,
+                connected=True,
+            )
+
+            result = await daemon._call_tool("test-server", "tool", {})
+
+            assert result["result"] == "plain result"
 

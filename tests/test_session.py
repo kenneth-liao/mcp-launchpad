@@ -146,9 +146,9 @@ class TestSessionClientDaemonManagement:
     async def test_is_daemon_running_checks_pid_file(self, mock_config, tmp_path, monkeypatch):
         """Test that _is_daemon_running checks PID file."""
         monkeypatch.setenv("MCPL_SESSION_ID", "test-daemon-check")
-        
+
         client = SessionClient(mock_config)
-        
+
         # No PID file - daemon not running
         with patch("mcp_launchpad.session.get_pid_file_path") as mock_path:
             mock_path.return_value = tmp_path / "nonexistent.pid"
@@ -159,14 +159,47 @@ class TestSessionClientDaemonManagement:
     async def test_start_daemon_spawns_detached_process(self, mock_config):
         """Test that _start_daemon spawns a detached subprocess."""
         client = SessionClient(mock_config)
-        
+
         with patch("subprocess.Popen") as mock_popen:
             await client._start_daemon()
-            
+
             mock_popen.assert_called_once()
             call_args = mock_popen.call_args
-            
+
             # Should include the daemon module
             assert "-m" in call_args[0][0]
             assert "mcp_launchpad.daemon" in call_args[0][0]
+
+    @pytest.mark.asyncio
+    async def test_is_daemon_running_with_dead_process(self, mock_config, tmp_path):
+        """Test _is_daemon_running with stale PID file."""
+        client = SessionClient(mock_config)
+
+        pid_file = tmp_path / "test.pid"
+        pid_file.write_text("99999")  # Non-existent process
+
+        with patch("mcp_launchpad.session.get_pid_file_path", return_value=pid_file):
+            with patch("mcp_launchpad.session.is_process_alive", return_value=False):
+                result = await client._is_daemon_running()
+                assert result is False
+
+    @pytest.mark.asyncio
+    async def test_send_request_no_response(self, mock_config):
+        """Test _send_request when daemon doesn't respond."""
+        client = SessionClient(mock_config)
+
+        with patch.object(client, "_ensure_daemon_running", new_callable=AsyncMock):
+            with patch("mcp_launchpad.session.connect_to_daemon", new_callable=AsyncMock) as mock_connect:
+                mock_reader = AsyncMock()
+                mock_writer = MagicMock()
+                mock_writer.close = MagicMock()
+                mock_writer.wait_closed = AsyncMock()
+                mock_connect.return_value = (mock_reader, mock_writer)
+
+                with patch("mcp_launchpad.session.write_message", new_callable=AsyncMock):
+                    with patch("mcp_launchpad.session.read_message", new_callable=AsyncMock) as mock_read:
+                        mock_read.return_value = None  # No response
+
+                        with pytest.raises(RuntimeError, match="No response"):
+                            await client._send_request(IPCMessage(action="test", payload={}))
 

@@ -1,12 +1,13 @@
 """MCP server connection management."""
 
+from __future__ import annotations
+
 import asyncio
 import os
-import sys
 import tempfile
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, AsyncGenerator, TextIO, cast
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -14,8 +15,8 @@ from mcp.types import Tool
 
 from .config import Config, ServerConfig
 
-# Connection timeout in seconds
-CONNECTION_TIMEOUT = 30
+# Connection timeout in seconds (configurable via MCPL_CONNECTION_TIMEOUT env var)
+CONNECTION_TIMEOUT = int(os.environ.get("MCPL_CONNECTION_TIMEOUT", "30"))
 
 
 @dataclass
@@ -47,7 +48,8 @@ class ToolInfo:
 
     def get_required_params(self) -> list[str]:
         """Extract required parameter names from input schema."""
-        return self.input_schema.get("required", [])
+        required: list[str] = self.input_schema.get("required", [])
+        return required
 
     def get_params_summary(self) -> str:
         """Get a brief summary of required and optional parameters.
@@ -77,7 +79,7 @@ class ToolInfo:
         properties = self.input_schema.get("properties", {})
 
         # Build example arguments
-        example_args = {}
+        example_args: dict[str, Any] = {}
         for param in required:
             prop = properties.get(param, {})
             param_type = prop.get("type", "string")
@@ -128,7 +130,7 @@ class ConnectionManager:
         return self.config.servers[server_name]
 
     @asynccontextmanager
-    async def connect(self, server_name: str):
+    async def connect(self, server_name: str) -> AsyncGenerator[ClientSession, None]:
         """Connect to an MCP server and yield the session.
 
         This is a context manager that handles connection lifecycle.
@@ -162,7 +164,9 @@ class ConnectionManager:
 
         # Use a temp file to capture stderr - we'll show it only on errors
         # This is needed because MCP's stdio_client requires a real file descriptor
-        with tempfile.NamedTemporaryFile(mode="w+", suffix=".stderr", delete=True) as stderr_file:
+        with tempfile.NamedTemporaryFile(mode="w+", suffix=".stderr", delete=True) as stderr_tmp:
+            # Cast to TextIO for type checker - NamedTemporaryFile in text mode is compatible
+            stderr_file = cast(TextIO, stderr_tmp)
             try:
                 async with asyncio.timeout(CONNECTION_TIMEOUT):
                     async with stdio_client(server_params, errlog=stderr_file) as (read, write):
@@ -170,8 +174,8 @@ class ConnectionManager:
                             await session.initialize()
                             yield session
             except asyncio.TimeoutError:
-                stderr_file.seek(0)
-                stderr_output = stderr_file.read()
+                stderr_tmp.seek(0)
+                stderr_output = stderr_tmp.read()
                 stderr_info = f"\n\nServer output:\n{stderr_output}" if stderr_output.strip() else ""
                 raise TimeoutError(
                     f"Connection to '{server_name}' timed out after {CONNECTION_TIMEOUT}s.\n\n"
@@ -190,8 +194,8 @@ class ConnectionManager:
                 ) from e
             except Exception as e:
                 # For any other errors, include stderr output if available
-                stderr_file.seek(0)
-                stderr_output = stderr_file.read()
+                stderr_tmp.seek(0)
+                stderr_output = stderr_tmp.read()
                 if stderr_output.strip():
                     # Append stderr to the error message
                     raise type(e)(

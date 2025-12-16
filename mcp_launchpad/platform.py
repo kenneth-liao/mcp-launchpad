@@ -1,10 +1,15 @@
 """Cross-platform utilities for session management and IPC."""
 
+from __future__ import annotations
+
 import os
 import sys
 import tempfile
-from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import ctypes
 
 # Platform detection
 IS_WINDOWS = sys.platform == "win32"
@@ -86,13 +91,13 @@ def _is_process_alive_unix(pid: int) -> bool:
 
 def _is_process_alive_windows(pid: int) -> bool:
     """Check if process is alive on Windows."""
-    import ctypes
-    from ctypes import wintypes
+    import ctypes  # noqa: PLC0415
+    from ctypes import wintypes  # noqa: PLC0415
 
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     STILL_ACTIVE = 259
 
-    kernel32 = ctypes.windll.kernel32
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
 
     handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
@@ -101,7 +106,7 @@ def _is_process_alive_windows(pid: int) -> bool:
     try:
         exit_code = wintypes.DWORD()
         if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
-            return exit_code.value == STILL_ACTIVE
+            return bool(exit_code.value == STILL_ACTIVE)
         return False
     finally:
         kernel32.CloseHandle(handle)
@@ -121,8 +126,8 @@ def get_parent_pid() -> int:
 
 def _get_parent_pid_windows() -> int:
     """Get parent PID on Windows using ctypes."""
-    import ctypes
-    from ctypes import wintypes
+    import ctypes  # noqa: PLC0415
+    from ctypes import wintypes  # noqa: PLC0415
 
     TH32CS_SNAPPROCESS = 0x00000002
 
@@ -140,7 +145,7 @@ def _get_parent_pid_windows() -> int:
             ("szExeFile", ctypes.c_char * 260),
         ]
 
-    kernel32 = ctypes.windll.kernel32
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
     current_pid = os.getpid()
 
     snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
@@ -154,7 +159,7 @@ def _get_parent_pid_windows() -> int:
         if kernel32.Process32First(snapshot, ctypes.byref(pe32)):
             while True:
                 if pe32.th32ProcessID == current_pid:
-                    return pe32.th32ParentProcessID
+                    return int(pe32.th32ParentProcessID)
                 if not kernel32.Process32Next(snapshot, ctypes.byref(pe32)):
                     break
     finally:

@@ -17,6 +17,9 @@ test = [
     "pytest-asyncio>=0.24.0",
     "pytest-cov>=4.1.0",
 ]
+dev = [
+    "mypy>=1.13.0",
+]
 
 [project.scripts]
 mcp-launchpad = "mcp_launchpad.cli:main"
@@ -44,3 +47,28 @@ exclude_lines = [
     "if TYPE_CHECKING:",
     "raise NotImplementedError",
 ]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_configs = true
+show_error_codes = true
+exclude = [
+    "tests/",
+    ".venv/",
+]
+
+[[tool.mypy.overrides]]
+module = [
+    "rank_bm25",
+    "mcp.*",
+]
+ignore_missing_imports = true
