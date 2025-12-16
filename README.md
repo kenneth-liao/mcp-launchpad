@@ -6,26 +6,30 @@ A lightweight CLI for efficiently discovering and executing tools from multiple 
 
 - **Unified Tool Discovery** - Search across all configured MCP servers with BM25, regex, or exact matching
 - **Persistent Connections** - Session daemon maintains server connections for faster repeated calls
-- **Auto-Configuration** - Reads Claude Desktop's `.mcp.json` format for seamless integration
+- **Auto-Configuration** - Reads from `./mcp.json` (project-level) or `~/.claude/mcp.json` (user-level) for seamless integration
 - **Cross-Platform** - Works on macOS, Linux, and Windows (experimental)
 - **JSON Mode** - Machine-readable output for scripting and automation
 
+## Requirements
+
+You must have uv installed to use this tool.
+
+- Python 3.13+
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) - a python package and environment manager
+
 ## Installation
 
-Requires Python 3.13+
+The MCP Launchpad CLI is available as a uv tool. Install it with one command and it will be available globally so that any agent (Claude Code, Gemini, Codex, etc.) can use it from any project/terminal!
 
 ```bash
-# Install from source
-git clone https://github.com/kenneth-liao/mcp-launchpad.git
-cd mcp-launchpad
-uv sync
+uv tool install https://github.com/kenneth-liao/mcp-launchpad.git
 ```
 
 ## Quick Start
 
 ### 1. Create a configuration file
 
-Create `.mcp.json` in your project directory (or `~/.claude/mcp.json` for global config):
+Create `mcp.json` in your project directory (or `~/.claude/mcp.json` for global config):
 
 ```json
 {
@@ -44,6 +48,8 @@ Create `.mcp.json` in your project directory (or `~/.claude/mcp.json` for global
   }
 }
 ```
+
+You can validate installation by running `mcpl list`. If you don't see any servers, restart your terminal and run `mcpl list --refresh`.
 
 ### 2. Search for tools
 
@@ -202,7 +208,13 @@ Windows support uses named pipes for IPC communication. While functional, it may
 
 ## Development
 
+Requires Python 3.13+
+
 ```bash
+# Install from source
+git clone https://github.com/kenneth-liao/mcp-launchpad.git
+cd mcp-launchpad
+
 # Install dev dependencies
 uv sync --all-extras
 
