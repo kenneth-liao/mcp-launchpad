@@ -12,3 +12,4 @@ wheels/
 # secrets
 .env
 .claude/
+docs/traces/
