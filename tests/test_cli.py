@@ -315,7 +315,11 @@ class TestInspectCommand:
 
 
 class TestCallCommand:
-    """Tests for the call command."""
+    """Tests for the call command.
+
+    Note: The call command uses SessionClient which communicates with a daemon
+    for persistent connections. We mock SessionClient for fast, isolated tests.
+    """
 
     def test_call_with_arguments(
         self, runner: CliRunner, tmp_path: Path, monkeypatch
@@ -326,15 +330,12 @@ class TestCallCommand:
         config_data = {"mcpServers": {"github": {"command": "test"}}}
         (tmp_path / ".mcp.json").write_text(json.dumps(config_data))
 
-        with patch("mcp_launchpad.cli.ConnectionManager") as MockManager:
-            mock_content = MagicMock()
-            mock_content.text = "Tool executed successfully"
-            mock_result = MagicMock()
-            mock_result.content = [mock_content]
-
-            mock_manager = MagicMock()
-            mock_manager.call_tool = AsyncMock(return_value=mock_result)
-            MockManager.return_value = mock_manager
+        with patch("mcp_launchpad.cli.SessionClient") as MockSession:
+            mock_session = MagicMock()
+            mock_session.call_tool = AsyncMock(
+                return_value={"result": "Tool executed successfully"}
+            )
+            MockSession.return_value = mock_session
 
             result = runner.invoke(
                 main,
@@ -354,15 +355,10 @@ class TestCallCommand:
         config_data = {"mcpServers": {"test": {"command": "test"}}}
         (tmp_path / ".mcp.json").write_text(json.dumps(config_data))
 
-        with patch("mcp_launchpad.cli.ConnectionManager") as MockManager:
-            mock_content = MagicMock()
-            mock_content.text = "Result"
-            mock_result = MagicMock()
-            mock_result.content = [mock_content]
-
-            mock_manager = MagicMock()
-            mock_manager.call_tool = AsyncMock(return_value=mock_result)
-            MockManager.return_value = mock_manager
+        with patch("mcp_launchpad.cli.SessionClient") as MockSession:
+            mock_session = MagicMock()
+            mock_session.call_tool = AsyncMock(return_value={"result": "Result"})
+            MockSession.return_value = mock_session
 
             result = runner.invoke(main, ["--json", "call", "test", "simple_tool"])
 
@@ -393,12 +389,12 @@ class TestCallCommand:
         config_data = {"mcpServers": {"github": {"command": "test"}}}
         (tmp_path / ".mcp.json").write_text(json.dumps(config_data))
 
-        with patch("mcp_launchpad.cli.ConnectionManager") as MockManager:
-            mock_manager = MagicMock()
-            mock_manager.call_tool = AsyncMock(
+        with patch("mcp_launchpad.cli.SessionClient") as MockSession:
+            mock_session = MagicMock()
+            mock_session.call_tool = AsyncMock(
                 side_effect=ValueError("Server 'nonexistent' not found")
             )
-            MockManager.return_value = mock_manager
+            MockSession.return_value = mock_session
 
             result = runner.invoke(main, ["call", "nonexistent", "some_tool", "{}"])
 
@@ -414,12 +410,12 @@ class TestCallCommand:
         config_data = {"mcpServers": {"github": {"command": "test"}}}
         (tmp_path / ".mcp.json").write_text(json.dumps(config_data))
 
-        with patch("mcp_launchpad.cli.ConnectionManager") as MockManager:
-            mock_manager = MagicMock()
-            mock_manager.call_tool = AsyncMock(
+        with patch("mcp_launchpad.cli.SessionClient") as MockSession:
+            mock_session = MagicMock()
+            mock_session.call_tool = AsyncMock(
                 side_effect=TimeoutError("Connection timed out")
             )
-            MockManager.return_value = mock_manager
+            MockSession.return_value = mock_session
 
             result = runner.invoke(main, ["call", "github", "create_issue", "{}"])
 

@@ -14,6 +14,7 @@ from .config import load_config
 from .connection import ConnectionManager
 from .output import OutputHandler
 from .search import SearchMethod, ToolSearcher
+from .session import SessionClient
 
 
 # Global options
@@ -208,6 +209,9 @@ def call(ctx: click.Context, server: str, tool: str, arguments: str | None, stdi
 
     ARGUMENTS should be a JSON object with the tool parameters.
     Use --stdin to read arguments from stdin for large payloads.
+
+    Uses a persistent session daemon to maintain stateful connections
+    to MCP servers across multiple calls.
     """
     output: OutputHandler = ctx.obj["output"]
     config = get_config(ctx)
@@ -227,30 +231,18 @@ def call(ctx: click.Context, server: str, tool: str, arguments: str | None, stdi
                 error_type="ArgumentParseError",
                 help_text=(
                     "Arguments must be valid JSON.\n\n"
-                    "Example: mcp call github list_issues '{\"owner\": \"acme\", \"repo\": \"api\"}'"
+                    "Example: mcpl call github list_issues '{\"owner\": \"acme\", \"repo\": \"api\"}'"
                 ),
             )
             return
 
-    # Call the tool
-    manager = ConnectionManager(config)
+    # Call the tool via session daemon (maintains persistent connections)
+    session = SessionClient(config)
     try:
-        result = asyncio.run(manager.call_tool(server, tool, args_dict))
+        result = asyncio.run(session.call_tool(server, tool, args_dict))
 
-        # Extract content from MCP result
-        if hasattr(result, "content"):
-            content = []
-            for item in result.content:
-                if hasattr(item, "text"):
-                    content.append(item.text)
-                elif hasattr(item, "data"):
-                    content.append(item.data)
-                else:
-                    content.append(str(item))
-            result_data = content[0] if len(content) == 1 else content
-        else:
-            result_data = result
-
+        # Result is already extracted by the daemon
+        result_data = result.get("result", result)
         output.success({"result": result_data})
     except Exception as e:
         output.error(e)
@@ -338,3 +330,76 @@ def list_cmd(ctx: click.Context, server: str | None, refresh: bool):
             if config.env_path:
                 click.echo(f"Env: {config.env_path}")
 
+
+@main.group()
+@click.pass_context
+def session(ctx: click.Context):
+    """Manage the session daemon for persistent MCP connections."""
+    pass
+
+
+@session.command("status")
+@click.pass_context
+def session_status(ctx: click.Context):
+    """Show the status of the session daemon and connected servers."""
+    output: OutputHandler = ctx.obj["output"]
+    config = get_config(ctx)
+
+    session_client = SessionClient(config)
+    try:
+        status = asyncio.run(session_client.get_status())
+
+        if ctx.obj["json_mode"]:
+            output.success(status)
+        else:
+            click.secho("\nSession Daemon Status:\n", bold=True)
+            click.echo(f"  Parent PID: {status.get('parent_pid', 'unknown')}")
+            click.echo(f"  Running: {status.get('running', False)}")
+            click.echo()
+
+            servers = status.get("servers", {})
+            if servers:
+                click.secho("Connected Servers:", bold=True)
+                for name, info in servers.items():
+                    connected = info.get("connected", False)
+                    error = info.get("error")
+                    status_color = "green" if connected else "red"
+                    status_text = "connected" if connected else f"disconnected"
+                    click.secho(f"  [{name}] ", fg="cyan", nl=False)
+                    click.secho(status_text, fg=status_color)
+                    if error:
+                        click.secho(f"    Error: {error}", fg="red")
+            else:
+                click.echo("  No servers connected yet.")
+    except Exception as e:
+        if "Failed to connect" in str(e) or "No response" in str(e):
+            if ctx.obj["json_mode"]:
+                output.success({"running": False, "servers": {}})
+            else:
+                click.echo("Session daemon is not running.")
+        else:
+            output.error(e)
+
+
+@session.command("stop")
+@click.pass_context
+def session_stop(ctx: click.Context):
+    """Stop the session daemon."""
+    output: OutputHandler = ctx.obj["output"]
+    config = get_config(ctx)
+
+    session_client = SessionClient(config)
+    try:
+        asyncio.run(session_client.shutdown())
+        if ctx.obj["json_mode"]:
+            output.success({"message": "Session daemon stopped"})
+        else:
+            click.secho("Session daemon stopped.", fg="green")
+    except Exception as e:
+        if "Failed to connect" in str(e):
+            if ctx.obj["json_mode"]:
+                output.success({"message": "Session daemon was not running"})
+            else:
+                click.echo("Session daemon was not running.")
+        else:
+            output.error(e)
