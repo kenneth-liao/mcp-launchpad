@@ -12,7 +12,7 @@ mcpl --help
 mcpl search "<query>"                    # Search all tools (shows required params)
 mcpl search "<query>" --first            # Top result with full details + example call
 mcpl list                                # List all MCP servers
-mcpl list <server>                       # List tools for a server
+mcpl list <server>                       # List tools for a server (shows required params)
 
 # Get tool details
 mcpl inspect <server> <tool>             # Full schema
@@ -21,18 +21,49 @@ mcpl inspect <server> <tool> --example   # Schema + example call
 # Execute tools
 mcpl call <server> <tool> '{}'                        # No arguments
 mcpl call <server> <tool> '{"param": "value"}'        # With arguments
+
+# Verify servers
+mcpl verify                              # Test all servers are working
 ```
 
-## Workflow Pattern
+## Important: Always Discover Before Calling
 
-1. **Search** → Find the right tool: `mcpl search "sentry errors"`
-2. **Call** → Execute with required params shown in search results
+Tool names vary between MCP servers. **Never guess tool names** - always discover them first.
 
-For complex tools, use `--first` to get the example call:
+### Recommended Workflow
+
+1. **Search first** to find the right tool (shows required params):
+   ```bash
+   mcpl search "list projects"
+   ```
+
+2. **Call with required params**:
+   ```bash
+   mcpl call vercel list_projects '{"teamId": "team_xxx"}'
+   ```
+
+### Alternative: List Server Tools
+
+If you know which server to use but not the tool name:
+```bash
+mcpl list vercel    # Shows all tools with required params
+```
+
+### Get Example Calls
+
+For complex tools, use `--first` to get a ready-to-use example:
 ```bash
 mcpl search "sentry issues" --first
-# Copy the example call and modify values
+# Shows: mcpl call sentry search_issues '{"organizationSlug": "<organizationSlug>", ...}'
 ```
+
+## Error Recovery
+
+If a tool call fails, mcpl provides helpful suggestions:
+
+- **Tool not found**: Shows similar tool names from that server
+- **Missing parameters**: Shows required params and an example call
+- **Validation errors**: Shows expected parameter types
 
 ## Server-Specific Tips
 

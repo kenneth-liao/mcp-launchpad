@@ -277,6 +277,15 @@ class Daemon:
         self, server_name: str, tool_name: str, arguments: dict[str, Any]
     ) -> dict[str, Any]:
         """Call a tool on the specified server."""
+        from .connection import ToolInfo
+        from .suggestions import (
+            find_similar_tools,
+            format_tool_suggestions,
+            format_validation_error,
+            is_tool_not_found_error,
+            is_validation_error,
+        )
+
         server_state = await self._ensure_server_connected(server_name)
 
         if server_state.session is None:
@@ -297,6 +306,50 @@ class Daemon:
             result_data = content[0] if len(content) == 1 else content
         else:
             result_data = result
+
+        # Check for MCP errors in the result and enrich them with helpful suggestions
+        if isinstance(result_data, str):
+            if is_tool_not_found_error(result_data):
+                # Get available tools and suggest similar ones
+                try:
+                    tools_result = await server_state.session.list_tools()
+                    available_tools = [
+                        ToolInfo(
+                            server=server_name,
+                            name=t.name,
+                            description=t.description or "",
+                            input_schema=t.inputSchema if hasattr(t, "inputSchema") else {},
+                        )
+                        for t in tools_result.tools
+                    ]
+                    similar = find_similar_tools(tool_name, available_tools)
+                    enriched_error = format_tool_suggestions(tool_name, server_name, similar)
+                    return {"result": enriched_error, "error": True, "error_type": "tool_not_found"}
+                except Exception:
+                    # If we can't get suggestions, return original error
+                    pass
+
+            elif is_validation_error(result_data):
+                # Try to get tool info for better error message
+                try:
+                    tools_result = await server_state.session.list_tools()
+                    tool_info = None
+                    for t in tools_result.tools:
+                        if t.name == tool_name:
+                            tool_info = ToolInfo(
+                                server=server_name,
+                                name=t.name,
+                                description=t.description or "",
+                                input_schema=t.inputSchema if hasattr(t, "inputSchema") else {},
+                            )
+                            break
+                    enriched_error = format_validation_error(
+                        tool_name, server_name, result_data, tool_info
+                    )
+                    return {"result": enriched_error, "error": True, "error_type": "validation_error"}
+                except Exception:
+                    # If we can't enrich, return original error
+                    pass
 
         return {"result": result_data}
 

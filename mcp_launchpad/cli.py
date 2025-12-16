@@ -14,13 +14,54 @@ import click
 from . import __version__
 from .cache import ToolCache
 from .config import Config, load_config
-from .connection import ConnectionManager
+from .connection import ConnectionManager, ToolInfo
 from .output import OutputHandler
 from .search import SearchMethod, ToolSearcher
 from .session import SessionClient
+from .suggestions import (
+    find_similar_tools,
+    format_tool_suggestions,
+    format_validation_error,
+    is_tool_not_found_error,
+    is_validation_error,
+)
 
 # Logger for CLI
 logger = logging.getLogger("mcpl")
+
+
+def _enrich_mcp_errors(
+    result_data: Any, server: str, tool: str, manager: ConnectionManager, config: Config
+) -> Any:
+    """Enrich MCP error messages with helpful suggestions.
+
+    Checks if the result contains a tool-not-found or validation error,
+    and enriches it with similar tool suggestions or schema information.
+    """
+    if not isinstance(result_data, str):
+        return result_data
+
+    if is_tool_not_found_error(result_data):
+        # Get available tools and suggest similar ones
+        try:
+            available_tools = asyncio.run(manager.list_tools(server))
+            similar = find_similar_tools(tool, available_tools)
+            return format_tool_suggestions(tool, server, similar)
+        except Exception:
+            # If we can't get suggestions, return original error
+            pass
+
+    elif is_validation_error(result_data):
+        # Try to get tool info for better error message
+        try:
+            available_tools = asyncio.run(manager.list_tools(server))
+            tool_info = next((t for t in available_tools if t.name == tool), None)
+            return format_validation_error(tool, server, result_data, tool_info)
+        except Exception:
+            # If we can't enrich, return original error
+            pass
+
+    return result_data
 
 
 @click.group()
@@ -272,12 +313,15 @@ def call(ctx: click.Context, server: str, tool: str, arguments: str | None, stdi
                 result_data: Any = content[0] if len(content) == 1 else content
             else:
                 result_data = result
+
+            # Check for MCP errors and enrich them (same as daemon does)
+            result_data = _enrich_mcp_errors(result_data, server, tool, manager, config)
         else:
             # Call the tool via session daemon (maintains persistent connections)
             logger.debug(f"Calling {server}/{tool} via daemon")
             session = SessionClient(config)
             result = asyncio.run(session.call_tool(server, tool, args_dict))
-            # Result is already extracted by the daemon
+            # Result is already extracted by the daemon (and errors enriched)
             result_data = result.get("result", result)
 
         output.success({"result": result_data})
@@ -326,7 +370,14 @@ def list_cmd(ctx: click.Context, server: str | None, refresh: bool) -> None:
         if ctx.obj["json_mode"]:
             output.success({
                 "server": server,
-                "tools": [{"name": t.name, "description": t.description} for t in server_tools],
+                "tools": [
+                    {
+                        "name": t.name,
+                        "description": t.description,
+                        "requiredParams": t.get_required_params(),
+                    }
+                    for t in server_tools
+                ],
             })
         else:
             click.secho(f"\nTools for [{server}]:\n", bold=True)
@@ -334,6 +385,11 @@ def list_cmd(ctx: click.Context, server: str | None, refresh: bool) -> None:
                 click.secho(f"  {t.name}", fg="green", bold=True)
                 if t.description:
                     click.echo(f"    {t.description[:70]}{'...' if len(t.description) > 70 else ''}")
+                # Show required params to help AI agents know what's needed upfront
+                required = t.get_required_params()
+                if required:
+                    click.secho(f"    ⚡ Requires: ", fg="yellow", nl=False)
+                    click.echo(", ".join(required))
     else:
         # List all servers
         tools = cache.get_tools()
@@ -440,3 +496,93 @@ def session_stop(ctx: click.Context) -> None:
                 click.echo("Session daemon was not running.")
         else:
             output.error(e)
+
+
+@main.command()
+@click.option("--timeout", "-t", default=30, help="Connection timeout per server in seconds")
+@click.pass_context
+def verify(ctx: click.Context, timeout: int) -> None:
+    """Verify all MCP servers are working.
+
+    Tests each configured server by connecting and listing its tools.
+    This is useful for quickly checking that all servers are properly
+    configured and responsive.
+    """
+    import os
+
+    output: OutputHandler = ctx.obj["output"]
+    config = get_config(ctx)
+
+    # Set timeout via environment for the connection manager
+    old_timeout = os.environ.get("MCPL_CONNECTION_TIMEOUT")
+    os.environ["MCPL_CONNECTION_TIMEOUT"] = str(timeout)
+
+    results: list[dict[str, Any]] = []
+    all_passed = True
+
+    if not ctx.obj["json_mode"]:
+        click.secho("\nVerifying MCP Servers...\n", bold=True)
+
+    async def verify_server(server_name: str) -> dict[str, Any]:
+        """Verify a single server by listing its tools."""
+        manager = ConnectionManager(config)
+        try:
+            tools = await manager.list_tools(server_name)
+            return {
+                "server": server_name,
+                "status": "ok",
+                "tools": len(tools),
+                "error": None,
+            }
+        except Exception as e:
+            return {
+                "server": server_name,
+                "status": "error",
+                "tools": 0,
+                "error": str(e).split("\n")[0],  # First line of error
+            }
+
+    # Test each server
+    for server_name in config.servers:
+        result = asyncio.run(verify_server(server_name))
+        results.append(result)
+
+        if result["status"] != "ok":
+            all_passed = False
+
+        if not ctx.obj["json_mode"]:
+            if result["status"] == "ok":
+                click.secho(f"  [{server_name}] ", fg="cyan", nl=False)
+                click.secho("OK", fg="green", nl=False)
+                click.echo(f" ({result['tools']} tools)")
+            else:
+                click.secho(f"  [{server_name}] ", fg="cyan", nl=False)
+                click.secho("FAILED", fg="red", nl=False)
+                click.echo(f" - {result['error']}")
+
+    # Restore original timeout
+    if old_timeout is not None:
+        os.environ["MCPL_CONNECTION_TIMEOUT"] = old_timeout
+    else:
+        os.environ.pop("MCPL_CONNECTION_TIMEOUT", None)
+
+    if ctx.obj["json_mode"]:
+        output.success({
+            "results": results,
+            "all_passed": all_passed,
+            "total": len(results),
+            "passed": sum(1 for r in results if r["status"] == "ok"),
+            "failed": sum(1 for r in results if r["status"] != "ok"),
+        })
+    else:
+        click.echo()
+        passed = sum(1 for r in results if r["status"] == "ok")
+        failed = len(results) - passed
+        if all_passed:
+            click.secho(f"All {len(results)} servers verified successfully.", fg="green")
+        else:
+            click.secho(f"Verification complete: {passed} passed, {failed} failed.", fg="yellow")
+            click.echo("\nTo debug a failed server, try:")
+            for r in results:
+                if r["status"] != "ok":
+                    click.echo(f"  mcpl list {r['server']} --refresh")
