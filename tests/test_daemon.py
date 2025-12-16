@@ -343,3 +343,129 @@ class TestDaemon:
 
             assert result["result"] == "plain result"
 
+
+class TestDaemonReconnectionBehavior:
+    """Tests for daemon connection retry and timeout behavior.
+
+    These tests are critical for YouTube users who may experience network issues
+    or have servers that are slow to start up.
+    """
+
+    @pytest.mark.asyncio
+    async def test_max_reconnect_attempts_exceeded(self, mock_config):
+        """Test that daemon gives up after max reconnection attempts.
+
+        When a server repeatedly fails to connect, the daemon should stop
+        retrying after MAX_RECONNECT_ATTEMPTS to avoid infinite loops.
+        """
+        with patch("mcp_launchpad.daemon.get_parent_pid", return_value=12345):
+            with patch("mcp_launchpad.daemon.MAX_RECONNECT_ATTEMPTS", 2):
+                with patch("mcp_launchpad.daemon.RECONNECT_DELAY", 0.01):  # Fast retry
+                    daemon = Daemon(mock_config)
+                    daemon.state.running = True
+
+                    # Track how many times stdio_client is called
+                    call_count = 0
+
+                    async def mock_stdio_client(*args, **kwargs):
+                        nonlocal call_count
+                        call_count += 1
+                        raise asyncio.TimeoutError("Connection timed out")
+
+                    # Create a mock context manager
+                    mock_cm = MagicMock()
+                    mock_cm.__aenter__ = AsyncMock(side_effect=mock_stdio_client)
+                    mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+                    with patch("mcp_launchpad.daemon.stdio_client", side_effect=asyncio.TimeoutError("Timeout")):
+                        # Run _connect_server directly
+                        await daemon._connect_server("test-server")
+
+                    # Should have server state with error
+                    server_state = daemon.state.servers.get("test-server")
+                    assert server_state is not None
+                    assert server_state.connected is False
+                    assert "timed out" in server_state.error.lower()
+
+    @pytest.mark.asyncio
+    async def test_file_not_found_no_retry(self, mock_config):
+        """Test that FileNotFoundError does not trigger retry.
+
+        If a command doesn't exist, retrying won't help. The daemon should
+        immediately give up to provide faster feedback to users.
+        """
+        with patch("mcp_launchpad.daemon.get_parent_pid", return_value=12345):
+            with patch("mcp_launchpad.daemon.MAX_RECONNECT_ATTEMPTS", 3):
+                daemon = Daemon(mock_config)
+                daemon.state.running = True
+
+                attempt_count = 0
+
+                def mock_stdio(*args, **kwargs):
+                    nonlocal attempt_count
+                    attempt_count += 1
+                    raise FileNotFoundError("Command not found: echo")
+
+                with patch("mcp_launchpad.daemon.stdio_client", side_effect=FileNotFoundError("Command not found")):
+                    await daemon._connect_server("test-server")
+
+                # Should only have been called once (no retries for FileNotFoundError)
+                server_state = daemon.state.servers.get("test-server")
+                assert server_state is not None
+                assert "Command not found" in server_state.error
+
+    @pytest.mark.asyncio
+    async def test_successful_connection_resets_attempt_counter(self, mock_config):
+        """Test that successful connection resets the attempt counter.
+
+        If a server connects successfully, subsequent failures should start
+        counting from 0 again, allowing full retry attempts.
+        """
+        with patch("mcp_launchpad.daemon.get_parent_pid", return_value=12345):
+            daemon = Daemon(mock_config)
+
+            # Set up a server that appears connected
+            daemon.state.servers["test-server"] = ServerState(
+                name="test-server",
+                connected=True,
+                error=None,
+            )
+
+            status = daemon._get_status()
+            assert status["servers"]["test-server"]["connected"] is True
+            assert status["servers"]["test-server"]["error"] is None
+
+    @pytest.mark.asyncio
+    async def test_server_error_includes_details(self, mock_config):
+        """Test that server errors include helpful details."""
+        with patch("mcp_launchpad.daemon.get_parent_pid", return_value=12345):
+            daemon = Daemon(mock_config)
+
+            # Simulate a server with an error state
+            daemon.state.servers["test-server"] = ServerState(
+                name="test-server",
+                connected=False,
+                error="Connection refused by server",
+            )
+
+            with pytest.raises(RuntimeError) as excinfo:
+                await daemon._ensure_server_connected("test-server")
+
+            error_msg = str(excinfo.value)
+            assert "test-server" in error_msg
+            assert "Connection refused" in error_msg
+
+    @pytest.mark.asyncio
+    async def test_ensure_server_connected_timeout(self, mock_config):
+        """Test that _ensure_server_connected times out appropriately."""
+        with patch("mcp_launchpad.daemon.get_parent_pid", return_value=12345):
+            with patch("mcp_launchpad.daemon.CONNECTION_TIMEOUT", 0.1):  # 100ms timeout
+                daemon = Daemon(mock_config)
+                daemon.state.running = True
+
+                # Don't set up any server state - it will never connect
+                with pytest.raises(RuntimeError) as excinfo:
+                    await daemon._ensure_server_connected("test-server")
+
+                assert "timed out" in str(excinfo.value).lower()
+

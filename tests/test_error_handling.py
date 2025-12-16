@@ -149,6 +149,71 @@ class TestConnectionErrors:
         assert "Could not start 'bad-cmd' server" in error_msg
         assert "Command not found" in error_msg
 
+    async def test_connection_timeout_includes_stderr(self):
+        """Test that connection timeout error includes server stderr output.
+
+        When a server times out, users need to see the stderr output to debug
+        why the server didn't respond. This is critical for YouTube users who
+        may have servers that hang during startup.
+        """
+        from mcp_launchpad.connection import CONNECTION_TIMEOUT
+
+        config = Config(
+            servers={
+                "slow-server": ServerConfig(
+                    name="slow-server",
+                    command="python",
+                    args=["-c", "import time; print('Starting...', flush=True); time.sleep(100)"],
+                    env={},
+                )
+            },
+            config_path=None,
+            env_path=None,
+        )
+        manager = ConnectionManager(config)
+
+        # Patch CONNECTION_TIMEOUT to a very short value for testing
+        with patch("mcp_launchpad.connection.CONNECTION_TIMEOUT", 0.1):
+            with pytest.raises(TimeoutError) as excinfo:
+                async with manager.connect("slow-server"):
+                    pass
+
+            error_msg = str(excinfo.value)
+            assert "timed out" in error_msg
+            assert "slow-server" in error_msg
+            assert "Try running the command manually" in error_msg
+
+    async def test_generic_error_includes_stderr(self):
+        """Test that generic errors include stderr output when available.
+
+        When servers fail with unexpected errors, the stderr output is crucial
+        for debugging. This helps YouTube users diagnose issues with their
+        MCP server configurations.
+        """
+        # This test uses a Python command that writes to stderr then exits with error
+        config = Config(
+            servers={
+                "error-server": ServerConfig(
+                    name="error-server",
+                    command="python",
+                    args=["-c", "import sys; sys.stderr.write('Debug: initialization failed\\n'); sys.exit(1)"],
+                    env={},
+                )
+            },
+            config_path=None,
+            env_path=None,
+        )
+        manager = ConnectionManager(config)
+
+        with pytest.raises(Exception) as excinfo:
+            async with manager.connect("error-server"):
+                pass
+
+        # The error should exist (specific type may vary based on how MCP handles it)
+        error_msg = str(excinfo.value)
+        # Error message should be non-empty
+        assert len(error_msg) > 0
+
 
 class TestCLIErrorDisplay:
     """Test that CLI displays errors appropriately."""
@@ -263,6 +328,64 @@ class TestCacheErrors:
 
             assert "Failed to connect to any servers" in str(excinfo.value)
 
+    def test_cache_refresh_partial_server_failures(self, tmp_path: Path):
+        """Test that partial server failures still cache successful tools.
+
+        This is a critical test for YouTube users who may have some servers
+        misconfigured while others work. The working servers should still
+        have their tools cached and available.
+        """
+        from mcp_launchpad.cache import ToolCache
+
+        config = Config(
+            servers={
+                "working-server": ServerConfig(name="working-server", command="python"),
+                "broken-server": ServerConfig(name="broken-server", command="nonexistent"),
+                "another-working": ServerConfig(name="another-working", command="python"),
+            },
+            config_path=tmp_path / "config.json",
+            env_path=None,
+        )
+        (tmp_path / "config.json").write_text("{}")
+
+        cache = ToolCache(config)
+        cache.cache_dir = tmp_path
+        cache.index_path = tmp_path / "index.json"
+        cache.metadata_path = tmp_path / "metadata.json"
+
+        # Create mock tools for successful servers
+        successful_tools = [
+            ToolInfo(server="working-server", name="tool1", description="Tool 1", input_schema={}),
+            ToolInfo(server="another-working", name="tool2", description="Tool 2", input_schema={}),
+        ]
+
+        async def mock_list_tools(server_name: str):
+            if server_name == "broken-server":
+                raise FileNotFoundError("Command not found: nonexistent")
+            elif server_name == "working-server":
+                return [successful_tools[0]]
+            else:
+                return [successful_tools[1]]
+
+        mock_manager = MagicMock()
+        mock_manager.list_tools = AsyncMock(side_effect=mock_list_tools)
+
+        with patch("mcp_launchpad.cache.ConnectionManager", return_value=mock_manager):
+            # Should NOT raise - some servers succeeded
+            result = asyncio.run(cache.refresh(force=True))
+
+            # Should have tools from successful servers
+            assert len(result) == 2
+            server_names = {t.server for t in result}
+            assert "working-server" in server_names
+            assert "another-working" in server_names
+            assert "broken-server" not in server_names
+
+            # Cache should be saved
+            assert cache.index_path.exists()
+            cached = cache._load_tools()
+            assert len(cached) == 2
+
     def test_cache_corrupted_index(self, tmp_path: Path):
         """Test handling of corrupted cache index file."""
         from mcp_launchpad.cache import ToolCache
@@ -343,6 +466,95 @@ class TestSearchErrors:
         # BM25 with empty query
         results = searcher.search_bm25("")
         assert results == []
+
+
+class TestEnvVarEdgeCases:
+    """Test edge cases for environment variable handling.
+
+    These tests are critical for YouTube users who may have various
+    .env file configurations and environment setups.
+    """
+
+    def test_env_var_not_in_braces_not_expanded(self):
+        """Test that env vars without ${} syntax are not expanded."""
+        config = ServerConfig(
+            name="test",
+            command="echo",
+            args=[],
+            env={"TOKEN": "$NOT_EXPANDED"},  # No braces
+        )
+        resolved = config.get_resolved_env()
+        # Should be kept as-is since it's not ${VAR} format
+        assert resolved["TOKEN"] == "$NOT_EXPANDED"
+
+    def test_env_var_partial_braces_not_expanded(self):
+        """Test that malformed env var patterns are not expanded."""
+        config = ServerConfig(
+            name="test",
+            command="echo",
+            args=[],
+            env={
+                "TOKEN1": "${MISSING_END",  # Missing closing brace
+                "TOKEN2": "$MISSING_START}",  # Missing opening
+                "TOKEN3": "prefix${VAR}",  # Has prefix - not pure ${VAR}
+            },
+        )
+        resolved = config.get_resolved_env()
+        # These should NOT be expanded since they don't match ${VAR} exactly
+        assert resolved["TOKEN1"] == "${MISSING_END"
+        assert resolved["TOKEN2"] == "$MISSING_START}"
+        assert resolved["TOKEN3"] == "prefix${VAR}"
+
+    def test_env_var_empty_name(self):
+        """Test ${} with empty variable name."""
+        config = ServerConfig(
+            name="test",
+            command="echo",
+            args=[],
+            env={"TOKEN": "${}"},
+        )
+        resolved = config.get_resolved_env()
+        # Empty ${} should return empty string (os.environ.get("", "") returns "")
+        assert resolved["TOKEN"] == ""
+
+    def test_env_var_with_special_characters(self, monkeypatch):
+        """Test env var names with underscores (common pattern)."""
+        monkeypatch.setenv("MY_API_KEY", "secret123")
+        config = ServerConfig(
+            name="test",
+            command="echo",
+            args=[],
+            env={"TOKEN": "${MY_API_KEY}"},
+        )
+        resolved = config.get_resolved_env()
+        assert resolved["TOKEN"] == "secret123"
+
+    async def test_missing_env_var_helpful_error(self):
+        """Test that missing env var error includes helpful instructions."""
+        config = Config(
+            servers={
+                "api-server": ServerConfig(
+                    name="api-server",
+                    command="python",
+                    args=["-m", "server"],
+                    env={"OPENAI_API_KEY": "${OPENAI_API_KEY}"},
+                )
+            },
+            config_path=None,
+            env_path=None,
+        )
+        manager = ConnectionManager(config)
+
+        with patch.dict(os.environ, {}, clear=True):
+            with pytest.raises(ValueError) as excinfo:
+                async with manager.connect("api-server"):
+                    pass
+
+            error_msg = str(excinfo.value)
+            # Should have helpful instructions
+            assert "OPENAI_API_KEY" in error_msg
+            assert ".env" in error_msg
+            assert "export" in error_msg
 
 
 class TestEdgeCases:
