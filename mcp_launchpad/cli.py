@@ -18,6 +18,7 @@ from .connection import ConnectionManager, ToolInfo
 from .output import OutputHandler
 from .search import SearchMethod, ToolSearcher
 from .session import SessionClient
+from .state import ServerState
 from .suggestions import (
     find_similar_tools,
     format_tool_suggestions,
@@ -342,9 +343,13 @@ def list_cmd(ctx: click.Context, server: str | None, refresh: bool) -> None:
     output: OutputHandler = ctx.obj["output"]
     config = get_config(ctx)
     cache = ToolCache(config)
+    state = ServerState(config)
 
-    # Refresh cache if requested
+    # Refresh cache if requested (only enabled servers)
     if refresh:
+        enabled_servers = list(state.get_enabled_servers().keys())
+        disabled_servers = state.get_disabled_servers()
+
         if not ctx.obj["json_mode"]:
             click.secho("\nRefreshing tool cache...\n", bold=True)
 
@@ -371,7 +376,14 @@ def list_cmd(ctx: click.Context, server: str | None, refresh: bool) -> None:
                 click.echo(f" - {error}")
 
         try:
-            asyncio.run(cache.refresh(force=True, on_progress=on_progress))
+            asyncio.run(cache.refresh(force=True, on_progress=on_progress, servers=enabled_servers))
+            # Show skipped disabled servers
+            if disabled_servers and not ctx.obj["json_mode"]:
+                click.echo()
+                for name in disabled_servers:
+                    click.secho(f"  [{name}] ", fg="cyan", nl=False)
+                    click.secho("SKIPPED", dim=True, nl=False)
+                    click.echo(" (disabled)")
             if not ctx.obj["json_mode"]:
                 click.secho("\nTool cache refreshed.", fg="green")
         except Exception as e:
@@ -425,11 +437,18 @@ def list_cmd(ctx: click.Context, server: str | None, refresh: bool) -> None:
         servers_data: list[dict[str, Any]] = []
         for name in config.servers:
             tool_count = server_tool_counts.get(name, 0)
-            status = "cached" if tool_count > 0 else "not cached"
+            is_disabled = state.is_disabled(name)
+            if is_disabled:
+                status = "disabled"
+            elif tool_count > 0:
+                status = "cached"
+            else:
+                status = "not cached"
             servers_data.append({
                 "name": name,
                 "status": status,
                 "tools": tool_count,
+                "disabled": is_disabled,
             })
 
         if ctx.obj["json_mode"]:
@@ -437,7 +456,12 @@ def list_cmd(ctx: click.Context, server: str | None, refresh: bool) -> None:
         else:
             click.secho("\nConfigured MCP Servers:\n", bold=True)
             for s in servers_data:
-                status_color = "green" if s["status"] == "cached" else "yellow"
+                if s["status"] == "disabled":
+                    status_color = "red"
+                elif s["status"] == "cached":
+                    status_color = "green"
+                else:
+                    status_color = "yellow"
                 click.secho(f"  [{s['name']}] ", fg="cyan", nl=False)
                 click.secho(f"{s['status']}", fg=status_color, nl=False)
                 if s["tools"] > 0:
@@ -537,6 +561,7 @@ def verify(ctx: click.Context, timeout: int) -> None:
 
     output: OutputHandler = ctx.obj["output"]
     config = get_config(ctx)
+    state = ServerState(config)
 
     # Set timeout via environment for the connection manager
     old_timeout = os.environ.get("MCPL_CONNECTION_TIMEOUT")
@@ -567,8 +592,8 @@ def verify(ctx: click.Context, timeout: int) -> None:
                 "error": str(e).split("\n")[0],  # First line of error
             }
 
-    # Test each server
-    for server_name in config.servers:
+    # Test each enabled server
+    for server_name in state.get_enabled_servers():
         result = asyncio.run(verify_server(server_name))
         results.append(result)
 
@@ -584,6 +609,15 @@ def verify(ctx: click.Context, timeout: int) -> None:
                 click.secho(f"  [{server_name}] ", fg="cyan", nl=False)
                 click.secho("FAILED", fg="red", nl=False)
                 click.echo(f" - {result['error']}")
+
+    # Show disabled servers
+    disabled_servers = state.get_disabled_servers()
+    if disabled_servers and not ctx.obj["json_mode"]:
+        click.echo()
+        for server_name in disabled_servers:
+            click.secho(f"  [{server_name}] ", fg="cyan", nl=False)
+            click.secho("SKIPPED", dim=True, nl=False)
+            click.echo(" (disabled)")
 
     # Restore original timeout
     if old_timeout is not None:
@@ -624,6 +658,7 @@ def show_config(ctx: click.Context, show_secrets: bool) -> None:
     """
     output: OutputHandler = ctx.obj["output"]
     config = get_config(ctx)
+    state = ServerState(config)
 
     if ctx.obj["json_mode"]:
         servers_data = {}
@@ -631,6 +666,7 @@ def show_config(ctx: click.Context, show_secrets: bool) -> None:
             server_info: dict[str, Any] = {
                 "command": server.command,
                 "args": server.args,
+                "disabled": state.is_disabled(name),
             }
             if show_secrets:
                 server_info["env"] = server.get_resolved_env()
@@ -651,7 +687,11 @@ def show_config(ctx: click.Context, show_secrets: bool) -> None:
 
         click.secho("\nConfigured Servers:\n", bold=True)
         for name, server in config.servers.items():
-            click.secho(f"  [{name}]", fg="cyan", bold=True)
+            click.secho(f"  [{name}]", fg="cyan", bold=True, nl=False)
+            if state.is_disabled(name):
+                click.secho(" (disabled)", fg="red")
+            else:
+                click.echo()
             click.echo(f"    command: {server.command}")
             if server.args:
                 click.echo(f"    args: {' '.join(server.args)}")
@@ -677,3 +717,54 @@ def show_config(ctx: click.Context, show_secrets: bool) -> None:
                             # Mask literal values
                             click.echo(f"      {key}: ***")
             click.echo()
+
+
+@main.command()
+@click.argument("server")
+@click.pass_context
+def enable(ctx: click.Context, server: str) -> None:
+    """Enable a server for use with mcpl commands.
+
+    Enabled servers will be included in refresh, verify, and other operations.
+    """
+    output: OutputHandler = ctx.obj["output"]
+    config = get_config(ctx)
+    state = ServerState(config)
+
+    try:
+        changed = state.enable(server)
+        if ctx.obj["json_mode"]:
+            output.success({"server": server, "enabled": True, "changed": changed})
+        else:
+            if changed:
+                click.secho(f"Server '{server}' enabled.", fg="green")
+            else:
+                click.echo(f"Server '{server}' was already enabled.")
+    except ValueError as e:
+        output.error(e, help_text=f"Available servers: {', '.join(config.servers.keys())}")
+
+
+@main.command()
+@click.argument("server")
+@click.pass_context
+def disable(ctx: click.Context, server: str) -> None:
+    """Disable a server from mcpl commands.
+
+    Disabled servers will be skipped during refresh, verify, and other operations.
+    Use 'mcpl enable <server>' to re-enable.
+    """
+    output: OutputHandler = ctx.obj["output"]
+    config = get_config(ctx)
+    state = ServerState(config)
+
+    try:
+        changed = state.disable(server)
+        if ctx.obj["json_mode"]:
+            output.success({"server": server, "enabled": False, "changed": changed})
+        else:
+            if changed:
+                click.secho(f"Server '{server}' disabled.", fg="yellow")
+            else:
+                click.echo(f"Server '{server}' was already disabled.")
+    except ValueError as e:
+        output.error(e, help_text=f"Available servers: {', '.join(config.servers.keys())}")

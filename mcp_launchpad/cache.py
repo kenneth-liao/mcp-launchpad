@@ -124,14 +124,16 @@ class ToolCache:
         self,
         force: bool = False,
         on_progress: Callable[[str, str, int | None, str | None], None] | None = None,
+        servers: list[str] | None = None,
     ) -> list[ToolInfo]:
-        """Refresh the tool cache by connecting to all servers.
+        """Refresh the tool cache by connecting to servers.
 
         Args:
             force: Force refresh even if cache is valid
             on_progress: Optional callback for progress updates.
                 Called with (server_name, status, tool_count, error_message)
                 where status is "connecting", "done", or "error"
+            servers: List of server names to refresh. If None, refreshes all servers.
         """
         if not force and self.is_cache_valid():
             return self._load_tools()
@@ -141,7 +143,10 @@ class ToolCache:
         server_times: dict[str, str] = {}
         errors: list[str] = []
 
-        for server_name in self.config.servers:
+        # Use provided servers list or default to all servers in config
+        servers_to_refresh = servers if servers is not None else list(self.config.servers.keys())
+
+        for server_name in servers_to_refresh:
             if on_progress:
                 on_progress(server_name, "connecting", None, None)
             try:

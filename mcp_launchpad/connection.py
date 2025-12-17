@@ -16,7 +16,7 @@ from mcp.types import Tool
 from .config import Config, ServerConfig
 
 # Connection timeout in seconds (configurable via MCPL_CONNECTION_TIMEOUT env var)
-CONNECTION_TIMEOUT = int(os.environ.get("MCPL_CONNECTION_TIMEOUT", "30"))
+CONNECTION_TIMEOUT = int(os.environ.get("MCPL_CONNECTION_TIMEOUT", "45"))
 
 
 @dataclass

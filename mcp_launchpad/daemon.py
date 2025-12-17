@@ -26,7 +26,7 @@ logger = logging.getLogger("mcpl.daemon")
 PARENT_CHECK_INTERVAL = int(os.environ.get("MCPL_PARENT_CHECK_INTERVAL", "5"))
 
 # Connection timeout for MCP servers (seconds) - configurable via env
-CONNECTION_TIMEOUT = int(os.environ.get("MCPL_CONNECTION_TIMEOUT", "30"))
+CONNECTION_TIMEOUT = int(os.environ.get("MCPL_CONNECTION_TIMEOUT", "45"))
 
 # Delay before retrying a failed server connection (seconds)
 RECONNECT_DELAY = int(os.environ.get("MCPL_RECONNECT_DELAY", "5"))
