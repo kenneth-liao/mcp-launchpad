@@ -123,6 +123,34 @@ mcpl session status   # Show daemon status and connected servers
 mcpl session stop     # Stop the session daemon
 ```
 
+### `mcpl enable|disable <server>`
+
+Enable or disable servers without modifying the config file.
+
+```bash
+mcpl disable slow-server   # Temporarily disable a server
+mcpl enable slow-server    # Re-enable it
+mcpl list                  # Shows disabled status
+```
+
+### `mcpl config`
+
+Show the current configuration and loaded servers.
+
+```bash
+mcpl config                # Show config summary
+mcpl config --show-secrets # Include environment variable values
+```
+
+### `mcpl verify`
+
+Test that all configured servers can connect and respond.
+
+```bash
+mcpl verify             # Test all servers
+mcpl verify --timeout 60  # With custom timeout
+```
+
 ## Configuration
 
 MCP Launchpad searches for configuration files in this order:
@@ -170,31 +198,85 @@ mcpl --json call github list_repos '{}'
 
 MCP Launchpad uses a session daemon to maintain persistent connections to MCP servers. This significantly improves performance when making multiple tool calls.
 
+### How It Works
+
 The daemon:
 - Starts automatically on first `mcpl call`
-- Maintains connections per terminal session
-- Shuts down automatically when the parent terminal closes
-- Can be manually stopped with `mcpl session stop`
+- Maintains connections per terminal/IDE session
+- Pre-connects to all configured servers for faster first calls
+- Reconnects automatically if a server connection drops
 
-If you encounter issues with the daemon, use `--no-daemon` flag to bypass it and connect directly.
+### Automatic Cleanup
+
+The daemon shuts down automatically in these scenarios:
+
+| Environment | Cleanup Trigger |
+|-------------|-----------------|
+| Regular terminal | Parent terminal process exits |
+| VS Code / Claude Code | IDE session ends (detected via VS Code socket) |
+| Any environment | Idle timeout (default: 1 hour of no activity) |
+| Manual | `mcpl session stop` command |
+
+### Troubleshooting
+
+```bash
+# Check daemon status and connected servers
+mcpl session status
+
+# Stop the daemon manually
+mcpl session stop
+
+# Bypass daemon entirely (slower but useful for debugging)
+mcpl call github list_repos '{}' --no-daemon
+```
+
+If you encounter persistent issues, stopping and restarting the daemon usually resolves them.
 
 ## Advanced Configuration
 
 ### Environment Variables
 
-Timeouts and daemon behavior can be configured via environment variables:
+All timeouts, daemon behavior, and session settings can be configured via environment variables.
+
+#### Connection Settings
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MCPL_CONNECTION_TIMEOUT` | `30` | Server connection timeout (seconds) |
-| `MCPL_DAEMON_START_TIMEOUT` | `30` | Max time to wait for daemon startup (seconds) |
-| `MCPL_RECONNECT_DELAY` | `5` | Delay between reconnection attempts (seconds) |
+| `MCPL_CONNECTION_TIMEOUT` | `45` | MCP server connection/initialization timeout (seconds) |
+| `MCPL_RECONNECT_DELAY` | `5` | Delay before retrying a failed server connection (seconds) |
 | `MCPL_MAX_RECONNECT_ATTEMPTS` | `3` | Max reconnection attempts before giving up |
 
-Example:
+#### Daemon Settings
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MCPL_DAEMON_START_TIMEOUT` | `30` | Max time to wait for daemon startup (seconds) |
+| `MCPL_DAEMON_CONNECT_RETRY_DELAY` | `0.2` | Delay between connection attempts to daemon (seconds) |
+| `MCPL_PARENT_CHECK_INTERVAL` | `5` | How often daemon checks if parent process is alive (seconds) |
+
+#### IDE/Session Settings
+
+These settings control daemon behavior in IDE environments (VS Code, Claude Code):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MCPL_IDLE_TIMEOUT` | `3600` | Shut down daemon after this many seconds of inactivity (0 to disable) |
+| `MCPL_IDE_ANCHOR_CHECK_INTERVAL` | `10` | How often to check if IDE session is still active (seconds) |
+| `MCPL_SESSION_ID` | (auto) | Override the session ID (for testing or advanced multi-session setups) |
+
+#### Examples
+
 ```bash
-export MCPL_CONNECTION_TIMEOUT=60  # 60 second timeout
+# Increase timeout for slow servers
+export MCPL_CONNECTION_TIMEOUT=120
 mcpl call slow-server long_running_tool '{}'
+
+# Disable idle timeout (daemon runs until explicitly stopped)
+export MCPL_IDLE_TIMEOUT=0
+
+# Use a custom session ID for isolated testing
+export MCPL_SESSION_ID=test-session-1
+mcpl call github list_repos '{}'
 ```
 
 ## Platform Notes

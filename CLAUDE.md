@@ -65,6 +65,22 @@ If a tool call fails, mcpl provides helpful suggestions:
 - **Missing parameters**: Shows required params and an example call
 - **Validation errors**: Shows expected parameter types
 
+### Troubleshooting Commands
+
+```bash
+mcpl verify                 # Test all server connections
+mcpl session status         # Check daemon and server connection status
+mcpl session stop           # Restart daemon (stops current, auto-restarts on next call)
+mcpl config                 # Show current configuration
+mcpl call <server> <tool> '{}' --no-daemon  # Bypass daemon for debugging
+```
+
+### Common Issues
+
+- **Server not connecting**: Run `mcpl verify` to test connections
+- **Stale connections**: Run `mcpl session stop` then retry
+- **Timeout errors**: Server may be slow; increase with `MCPL_CONNECTION_TIMEOUT=120`
+
 ## Server-Specific Tips
 
 ### Sentry
