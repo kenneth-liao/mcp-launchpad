@@ -133,8 +133,8 @@ class UnixIPCServer(IPCServer):
                     error_response = IPCMessage(action="error", payload={"error": str(e)})
                     try:
                         await write_message(writer, error_response)
-                    except Exception:
-                        pass  # Connection may already be broken
+                    except Exception as write_err:
+                        logger.debug(f"Failed to send error response (connection broken): {write_err}")
         except Exception as e:
             logger.exception(f"Error handling IPC client: {e}")
         finally:
@@ -231,9 +231,8 @@ class WindowsIPCServer(IPCServer):
         )
 
         if success and bytes_read.value > 0:
-            # Parse message (skip length header - Windows pipes handle framing)
-            data = buffer.raw[HEADER_SIZE : HEADER_SIZE + bytes_read.value - HEADER_SIZE]
             try:
+                # Parse message - skip the 4-byte length header prefix
                 message = IPCMessage.from_bytes(
                     buffer.raw[HEADER_SIZE : bytes_read.value]
                 )
@@ -250,8 +249,8 @@ class WindowsIPCServer(IPCServer):
                     ctypes.byref(bytes_written),
                     None,
                 )
-            except Exception:
-                pass  # Connection error, client will retry
+            except Exception as e:
+                logger.debug(f"Windows pipe client error: {e}")
 
 
 async def connect_to_daemon() -> tuple[asyncio.StreamReader, asyncio.StreamWriter] | None:

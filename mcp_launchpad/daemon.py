@@ -87,11 +87,13 @@ class Daemon:
         )
         self._ipc_server = create_ipc_server(self._handle_request)
         self._connection_tasks: dict[str, asyncio.Task[None]] = {}
-        self._contexts: dict[str, Any] = {}  # Store context managers
 
     async def start(self) -> None:
         """Start the daemon."""
         logger.info(f"Daemon starting, monitoring parent PID {self.state.parent_pid}")
+
+        # Clean up any orphaned stderr files from previous daemon runs
+        self._cleanup_orphaned_stderr_files()
 
         # Set up signal handlers for graceful shutdown
         self._setup_signal_handlers()
@@ -138,7 +140,8 @@ class Daemon:
     async def _connect_all_servers(self) -> None:
         """Connect to all configured MCP servers."""
         for server_name in self.state.config.servers:
-            asyncio.create_task(self._connect_server(server_name))
+            task = asyncio.create_task(self._connect_server(server_name))
+            self._connection_tasks[server_name] = task
 
     async def _connect_server(self, server_name: str) -> None:
         """Connect to a single MCP server and maintain the connection with auto-restart."""
@@ -212,6 +215,10 @@ class Daemon:
                 logger.error(f"Server {server_name}: Command not found: {server_config.command}")
                 # Don't retry if command not found
                 return
+            except asyncio.CancelledError:
+                # Task was cancelled (daemon shutting down) - clean exit
+                logger.debug(f"Server {server_name}: connection task cancelled")
+                return
             except Exception as e:
                 error_str = str(e)
                 # Provide more context for common errors
@@ -226,6 +233,14 @@ class Daemon:
             finally:
                 server_state.connected = False
                 server_state.session = None
+                # Clean up stderr file if we're going to retry (new one will be created)
+                # Keep it on final failure so _shutdown can read it for diagnostics
+                if self.state.running and attempt < MAX_RECONNECT_ATTEMPTS:
+                    try:
+                        stderr_tmp.close()
+                        Path(stderr_tmp.name).unlink(missing_ok=True)
+                    except Exception as e:
+                        logger.debug(f"Failed to cleanup stderr file: {e}")
 
             # Wait before retrying
             if self.state.running and attempt < MAX_RECONNECT_ATTEMPTS:
@@ -523,18 +538,32 @@ class Daemon:
         """Clean shutdown of daemon."""
         logger.info("Daemon shutting down")
 
-        # Stop IPC server
+        # Stop IPC server first (stop accepting new requests)
         await self._ipc_server.stop()
 
-        # Close all server connections (they'll close when context exits)
+        # Cancel all connection tasks and wait for them to complete
+        for server_name, task in self._connection_tasks.items():
+            if not task.done():
+                logger.debug(f"Cancelling connection task for {server_name}")
+                task.cancel()
+
+        # Wait for all tasks to complete cancellation
+        if self._connection_tasks:
+            await asyncio.gather(
+                *self._connection_tasks.values(),
+                return_exceptions=True  # Don't raise on CancelledError
+            )
+            self._connection_tasks.clear()
+
+        # Close all server connections and clean up stderr files
         for state in self.state.servers.values():
             state.session = None
             if state.stderr_file:
                 try:
                     state.stderr_file.close()
                     Path(state.stderr_file.name).unlink(missing_ok=True)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Failed to cleanup stderr file for {state.name}: {e}")
 
         # Remove PID file
         self._remove_pid_file()
@@ -550,6 +579,27 @@ class Daemon:
         """Remove the PID file."""
         pid_file = get_pid_file_path()
         pid_file.unlink(missing_ok=True)
+
+    def _cleanup_orphaned_stderr_files(self) -> None:
+        """Clean up orphaned stderr files from previous daemon runs.
+
+        These files are created in the system temp directory with a .stderr suffix.
+        If the daemon crashed previously, these files may remain.
+        """
+        import glob
+
+        temp_dir = tempfile.gettempdir()
+        pattern = os.path.join(temp_dir, "*.stderr")
+        orphaned_files = glob.glob(pattern)
+
+        if orphaned_files:
+            logger.debug(f"Cleaning up {len(orphaned_files)} orphaned stderr file(s)")
+            for filepath in orphaned_files:
+                try:
+                    os.unlink(filepath)
+                    logger.debug(f"Removed orphaned stderr file: {filepath}")
+                except Exception as e:
+                    logger.debug(f"Failed to remove orphaned file {filepath}: {e}")
 
 
 async def run_daemon(config_path: Path | None = None) -> None:

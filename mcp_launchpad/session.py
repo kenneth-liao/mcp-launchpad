@@ -226,27 +226,31 @@ class SessionClient:
         log_file.parent.mkdir(parents=True, exist_ok=True)
         log_handle = open(log_file, "w")
 
-        # Start as detached process
-        if IS_WINDOWS:
-            # Windows: Use CREATE_NEW_PROCESS_GROUP and DETACHED_PROCESS
-            DETACHED_PROCESS = 0x00000008
-            CREATE_NEW_PROCESS_GROUP = 0x00000200
-            subprocess.Popen(
-                daemon_cmd,
-                env=daemon_env,
-                creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
-                stdout=log_handle,
-                stderr=log_handle,
-                stdin=subprocess.DEVNULL,
-            )
-        else:
-            # Unix: Use double-fork or nohup pattern
-            subprocess.Popen(
-                daemon_cmd,
-                env=daemon_env,
-                stdout=log_handle,
-                stderr=log_handle,
-                stdin=subprocess.DEVNULL,
-                start_new_session=True,
-            )
+        try:
+            # Start as detached process
+            if IS_WINDOWS:
+                # Windows: Use CREATE_NEW_PROCESS_GROUP and DETACHED_PROCESS
+                DETACHED_PROCESS = 0x00000008
+                CREATE_NEW_PROCESS_GROUP = 0x00000200
+                subprocess.Popen(
+                    daemon_cmd,
+                    env=daemon_env,
+                    creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+                    stdout=log_handle,
+                    stderr=log_handle,
+                    stdin=subprocess.DEVNULL,
+                )
+            else:
+                # Unix: Use double-fork or nohup pattern
+                subprocess.Popen(
+                    daemon_cmd,
+                    env=daemon_env,
+                    stdout=log_handle,
+                    stderr=log_handle,
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+        finally:
+            # Close the log handle in the parent process - the child has its own copy
+            log_handle.close()
 
