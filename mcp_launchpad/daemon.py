@@ -17,7 +17,13 @@ from mcp.client.stdio import stdio_client
 
 from .config import Config, load_config
 from .ipc import IPCMessage, create_ipc_server
-from .platform import IS_WINDOWS, get_parent_pid, get_pid_file_path, is_process_alive
+from .platform import (
+    IS_WINDOWS,
+    get_parent_pid,
+    get_pid_file_path,
+    is_ide_environment,
+    is_process_alive,
+)
 
 # Logging configuration for daemon
 logger = logging.getLogger("mcpl.daemon")
@@ -422,7 +428,22 @@ class Daemon:
         }
 
     async def _monitor_parent(self) -> None:
-        """Monitor if parent process is still alive."""
+        """Monitor if parent process is still alive.
+
+        In IDE environments (VS Code, Claude Code), we don't monitor the parent
+        process because each terminal command runs in a separate subprocess.
+        The daemon should stay alive for the entire IDE session until explicitly
+        stopped via 'mcpl session stop' or a signal.
+        """
+        # In IDE environments, don't shut down when parent exits
+        if is_ide_environment():
+            logger.info("IDE environment detected - daemon will persist across commands")
+            # Just wait indefinitely (daemon stays alive until signal or explicit stop)
+            while self.state.running:
+                await asyncio.sleep(PARENT_CHECK_INTERVAL)
+            return
+
+        # Standard behavior: shut down when parent process dies
         while self.state.running:
             await asyncio.sleep(PARENT_CHECK_INTERVAL)
 

@@ -13,8 +13,52 @@ from mcp_launchpad.platform import (
     get_pid_file_path,
     get_session_id,
     get_socket_path,
+    is_ide_environment,
     is_process_alive,
 )
+
+
+@pytest.fixture
+def clear_ide_env(monkeypatch):
+    """Clear all IDE-related environment variables for clean testing."""
+    monkeypatch.delenv("VSCODE_GIT_IPC_HANDLE", raising=False)
+    monkeypatch.delenv("CLAUDECODE", raising=False)
+    monkeypatch.delenv("VSCODE_INJECTION", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_SSE_PORT", raising=False)
+
+
+class TestIsIdeEnvironment:
+    """Tests for is_ide_environment function."""
+
+    def test_detects_vscode_git_ipc_handle(self, monkeypatch):
+        """Test detection of VS Code via VSCODE_GIT_IPC_HANDLE."""
+        monkeypatch.delenv("VSCODE_GIT_IPC_HANDLE", raising=False)
+        monkeypatch.delenv("CLAUDECODE", raising=False)
+        monkeypatch.delenv("VSCODE_INJECTION", raising=False)
+        assert is_ide_environment() is False
+
+        monkeypatch.setenv("VSCODE_GIT_IPC_HANDLE", "/tmp/vscode-git-abc123.sock")
+        assert is_ide_environment() is True
+
+    def test_detects_claudecode_env(self, monkeypatch):
+        """Test detection of Claude Code via CLAUDECODE env var."""
+        monkeypatch.delenv("VSCODE_GIT_IPC_HANDLE", raising=False)
+        monkeypatch.delenv("CLAUDECODE", raising=False)
+        monkeypatch.delenv("VSCODE_INJECTION", raising=False)
+        assert is_ide_environment() is False
+
+        monkeypatch.setenv("CLAUDECODE", "1")
+        assert is_ide_environment() is True
+
+    def test_detects_vscode_injection(self, monkeypatch):
+        """Test detection of VS Code via VSCODE_INJECTION."""
+        monkeypatch.delenv("VSCODE_GIT_IPC_HANDLE", raising=False)
+        monkeypatch.delenv("CLAUDECODE", raising=False)
+        monkeypatch.delenv("VSCODE_INJECTION", raising=False)
+        assert is_ide_environment() is False
+
+        monkeypatch.setenv("VSCODE_INJECTION", "1")
+        assert is_ide_environment() is True
 
 
 class TestGetSessionId:
@@ -29,14 +73,39 @@ class TestGetSessionId:
     def test_uses_term_session_id_on_macos(self, monkeypatch):
         """Test that TERM_SESSION_ID is used on macOS."""
         monkeypatch.delenv("MCPL_SESSION_ID", raising=False)
+        # Clear VS Code/Claude Code env vars
+        monkeypatch.delenv("VSCODE_GIT_IPC_HANDLE", raising=False)
+        monkeypatch.delenv("CLAUDECODE", raising=False)
+        monkeypatch.delenv("VSCODE_INJECTION", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_SSE_PORT", raising=False)
         monkeypatch.setenv("TERM_SESSION_ID", "macos-term-session")
         monkeypatch.delenv("WINDOWID", raising=False)
         assert get_session_id() == "macos-term-session"
+
+    def test_uses_vscode_git_ipc_session(self, monkeypatch):
+        """Test that VS Code Git IPC handle is used for session ID."""
+        monkeypatch.delenv("MCPL_SESSION_ID", raising=False)
+        monkeypatch.delenv("TERM_SESSION_ID", raising=False)
+        monkeypatch.setenv("VSCODE_GIT_IPC_HANDLE", "/var/folders/xx/vscode-git-abc123def.sock")
+        assert get_session_id() == "vscode-abc123def"
+
+    def test_uses_claude_code_sse_port(self, monkeypatch):
+        """Test that Claude Code SSE port is used when no Git IPC handle."""
+        monkeypatch.delenv("MCPL_SESSION_ID", raising=False)
+        monkeypatch.delenv("TERM_SESSION_ID", raising=False)
+        monkeypatch.delenv("VSCODE_GIT_IPC_HANDLE", raising=False)
+        monkeypatch.setenv("CLAUDE_CODE_SSE_PORT", "12345")
+        assert get_session_id() == "claude-12345"
 
     def test_uses_windowid_on_linux(self, monkeypatch):
         """Test that WINDOWID is used on Linux X11."""
         monkeypatch.delenv("MCPL_SESSION_ID", raising=False)
         monkeypatch.delenv("TERM_SESSION_ID", raising=False)
+        # Clear VS Code/Claude Code env vars
+        monkeypatch.delenv("VSCODE_GIT_IPC_HANDLE", raising=False)
+        monkeypatch.delenv("CLAUDECODE", raising=False)
+        monkeypatch.delenv("VSCODE_INJECTION", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_SSE_PORT", raising=False)
         monkeypatch.setenv("WINDOWID", "12345678")
         monkeypatch.delenv("WT_SESSION", raising=False)
         assert get_session_id() == "12345678"
@@ -45,6 +114,11 @@ class TestGetSessionId:
         """Test that WT_SESSION is used on Windows Terminal."""
         monkeypatch.delenv("MCPL_SESSION_ID", raising=False)
         monkeypatch.delenv("TERM_SESSION_ID", raising=False)
+        # Clear VS Code/Claude Code env vars
+        monkeypatch.delenv("VSCODE_GIT_IPC_HANDLE", raising=False)
+        monkeypatch.delenv("CLAUDECODE", raising=False)
+        monkeypatch.delenv("VSCODE_INJECTION", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_SSE_PORT", raising=False)
         monkeypatch.delenv("WINDOWID", raising=False)
         monkeypatch.setenv("WT_SESSION", "windows-terminal-guid")
         assert get_session_id() == "windows-terminal-guid"
@@ -53,6 +127,11 @@ class TestGetSessionId:
         """Test fallback to parent PID when no session env vars set."""
         monkeypatch.delenv("MCPL_SESSION_ID", raising=False)
         monkeypatch.delenv("TERM_SESSION_ID", raising=False)
+        # Clear VS Code/Claude Code env vars
+        monkeypatch.delenv("VSCODE_GIT_IPC_HANDLE", raising=False)
+        monkeypatch.delenv("CLAUDECODE", raising=False)
+        monkeypatch.delenv("VSCODE_INJECTION", raising=False)
+        monkeypatch.delenv("CLAUDE_CODE_SSE_PORT", raising=False)
         monkeypatch.delenv("WINDOWID", raising=False)
         monkeypatch.delenv("WT_SESSION", raising=False)
         session_id = get_session_id()

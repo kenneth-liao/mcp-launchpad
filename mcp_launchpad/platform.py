@@ -15,6 +15,28 @@ if TYPE_CHECKING:
 IS_WINDOWS = sys.platform == "win32"
 
 
+def is_ide_environment() -> bool:
+    """Check if running in an IDE environment (VS Code, Claude Code, etc.).
+
+    In IDE environments, the daemon should not shut down when its immediate
+    parent process dies, because each terminal command runs in a separate
+    subprocess. Instead, the daemon should stay alive for the entire IDE session.
+    """
+    # VS Code sets VSCODE_GIT_IPC_HANDLE
+    if os.environ.get("VSCODE_GIT_IPC_HANDLE"):
+        return True
+
+    # Claude Code sets CLAUDECODE=1
+    if os.environ.get("CLAUDECODE"):
+        return True
+
+    # VS Code injection marker
+    if os.environ.get("VSCODE_INJECTION"):
+        return True
+
+    return False
+
+
 def get_session_id() -> str:
     """Get a unique identifier for the current terminal session.
 
@@ -24,17 +46,40 @@ def get_session_id() -> str:
     Priority order:
     1. MCPL_SESSION_ID - explicit override for testing/advanced usage
     2. TERM_SESSION_ID - macOS Terminal.app
-    3. WINDOWID - X11 terminals (Linux)
-    4. WT_SESSION - Windows Terminal
-    5. Parent PID - fallback (works everywhere)
+    3. VS Code/Claude Code session - extracted from VSCODE_GIT_IPC_HANDLE
+    4. WINDOWID - X11 terminals (Linux)
+    5. WT_SESSION - Windows Terminal
+    6. Parent PID - fallback (works everywhere)
     """
-    return (
-        os.environ.get("MCPL_SESSION_ID")
-        or os.environ.get("TERM_SESSION_ID")
-        or os.environ.get("WINDOWID")
-        or os.environ.get("WT_SESSION")
-        or str(os.getppid())
-    )
+    # Explicit override
+    if session_id := os.environ.get("MCPL_SESSION_ID"):
+        return session_id
+
+    # macOS Terminal.app
+    if session_id := os.environ.get("TERM_SESSION_ID"):
+        return session_id
+
+    # VS Code / Claude Code - extract unique session ID from Git IPC handle
+    # Format: /var/folders/.../vscode-git-{session_id}.sock
+    if git_ipc := os.environ.get("VSCODE_GIT_IPC_HANDLE"):
+        import re
+        if match := re.search(r"vscode-git-([a-f0-9]+)\.sock", git_ipc):
+            return f"vscode-{match.group(1)}"
+
+    # Claude Code fallback - use SSE port as session identifier
+    if sse_port := os.environ.get("CLAUDE_CODE_SSE_PORT"):
+        return f"claude-{sse_port}"
+
+    # X11 terminals (Linux)
+    if session_id := os.environ.get("WINDOWID"):
+        return session_id
+
+    # Windows Terminal
+    if session_id := os.environ.get("WT_SESSION"):
+        return session_id
+
+    # Fallback to parent PID (works everywhere but not ideal for Claude Code)
+    return str(os.getppid())
 
 
 def get_socket_path() -> Path:
