@@ -28,14 +28,18 @@ class TestConfigErrors:
 
         error_msg = str(excinfo.value)
         assert "No MCP config file found" in error_msg
-        assert ".mcp.json" in error_msg
+        assert "mcp.json" in error_msg
         # Should include example config
         assert "mcpServers" in error_msg
 
     def test_config_file_empty(self, tmp_path: Path, monkeypatch):
         """Test handling of empty config file."""
         monkeypatch.chdir(tmp_path)
-        (tmp_path / ".mcp.json").write_text("")
+        # Isolate test from user's real config files
+        import mcp_launchpad.config as config_module
+        monkeypatch.setattr(config_module, "CONFIG_SEARCH_DIRS", [Path(".")])
+
+        (tmp_path / "mcp.json").write_text("")
 
         with pytest.raises(json.JSONDecodeError):
             load_config()
@@ -43,7 +47,11 @@ class TestConfigErrors:
     def test_config_file_not_object(self, tmp_path: Path, monkeypatch):
         """Test handling of config that's not a JSON object."""
         monkeypatch.chdir(tmp_path)
-        (tmp_path / ".mcp.json").write_text('["array", "not", "object"]')
+        # Isolate test from user's real config files
+        import mcp_launchpad.config as config_module
+        monkeypatch.setattr(config_module, "CONFIG_SEARCH_DIRS", [Path(".")])
+
+        (tmp_path / "mcp.json").write_text('["array", "not", "object"]')
 
         # Should raise AttributeError since list doesn't have .get()
         with pytest.raises(AttributeError):
@@ -52,6 +60,10 @@ class TestConfigErrors:
     def test_config_with_null_values(self, tmp_path: Path, monkeypatch):
         """Test handling of null values in config."""
         monkeypatch.chdir(tmp_path)
+        # Isolate test from user's real config files
+        import mcp_launchpad.config as config_module
+        monkeypatch.setattr(config_module, "CONFIG_SEARCH_DIRS", [Path(".")])
+
         config_data = {
             "mcpServers": {
                 "test": {
@@ -61,7 +73,7 @@ class TestConfigErrors:
                 }
             }
         }
-        (tmp_path / ".mcp.json").write_text(json.dumps(config_data))
+        (tmp_path / "mcp.json").write_text(json.dumps(config_data))
 
         # Should handle None values gracefully
         config = load_config()
@@ -240,7 +252,7 @@ class TestCLIErrorDisplay:
         monkeypatch.chdir(tmp_path)
         # Create a valid config but with a server that will fail
         config_data = {"mcpServers": {"test": {"command": "test"}}}
-        (tmp_path / ".mcp.json").write_text(json.dumps(config_data))
+        (tmp_path / "mcp.json").write_text(json.dumps(config_data))
 
         with patch("mcp_launchpad.cli.ToolCache") as MockCache:
             mock_cache = MagicMock()
@@ -263,7 +275,7 @@ class TestCLIErrorDisplay:
         monkeypatch.chdir(tmp_path)
         # Create a valid config but with a server that will fail
         config_data = {"mcpServers": {"test": {"command": "test"}}}
-        (tmp_path / ".mcp.json").write_text(json.dumps(config_data))
+        (tmp_path / "mcp.json").write_text(json.dumps(config_data))
 
         with patch("mcp_launchpad.cli.ToolCache") as MockCache:
             mock_cache = MagicMock()
@@ -282,7 +294,7 @@ class TestCLIErrorDisplay:
         monkeypatch.chdir(tmp_path)
         # Create a valid config but with a server that will fail
         config_data = {"mcpServers": {"test": {"command": "test"}}}
-        (tmp_path / ".mcp.json").write_text(json.dumps(config_data))
+        (tmp_path / "mcp.json").write_text(json.dumps(config_data))
 
         with patch("mcp_launchpad.cli.ToolCache") as MockCache:
             mock_cache = MagicMock()
@@ -496,17 +508,18 @@ class TestEnvVarEdgeCases:
             env={
                 "TOKEN1": "${MISSING_END",  # Missing closing brace
                 "TOKEN2": "$MISSING_START}",  # Missing opening
-                "TOKEN3": "prefix${VAR}",  # Has prefix - not pure ${VAR}
+                "TOKEN3": "prefix${VAR}",  # Has prefix - gets partial expansion
             },
         )
         resolved = config.get_resolved_env()
-        # These should NOT be expanded since they don't match ${VAR} exactly
+        # Malformed patterns without closing brace or opening ${ stay unchanged
         assert resolved["TOKEN1"] == "${MISSING_END"
         assert resolved["TOKEN2"] == "$MISSING_START}"
-        assert resolved["TOKEN3"] == "prefix${VAR}"
+        # Valid ${VAR} pattern gets expanded (VAR not set = empty string)
+        assert resolved["TOKEN3"] == "prefix"
 
     def test_env_var_empty_name(self):
-        """Test ${} with empty variable name."""
+        """Test ${} with empty variable name - doesn't match regex."""
         config = ServerConfig(
             name="test",
             command="echo",
@@ -514,8 +527,9 @@ class TestEnvVarEdgeCases:
             env={"TOKEN": "${}"},
         )
         resolved = config.get_resolved_env()
-        # Empty ${} should return empty string (os.environ.get("", "") returns "")
-        assert resolved["TOKEN"] == ""
+        # Empty ${} doesn't match regex pattern \$\{([^}]+)\} (requires 1+ chars)
+        # so it stays unchanged
+        assert resolved["TOKEN"] == "${}"
 
     def test_env_var_with_special_characters(self, monkeypatch):
         """Test env var names with underscores (common pattern)."""
@@ -612,6 +626,9 @@ class TestEdgeCases:
     def test_config_with_unicode_characters(self, tmp_path: Path, monkeypatch):
         """Test config with unicode in server names and values."""
         monkeypatch.chdir(tmp_path)
+        # Isolate test from user's real config files
+        import mcp_launchpad.config as config_module
+        monkeypatch.setattr(config_module, "CONFIG_SEARCH_DIRS", [Path(".")])
 
         config_data = {
             "mcpServers": {
@@ -621,7 +638,7 @@ class TestEdgeCases:
                 }
             }
         }
-        (tmp_path / ".mcp.json").write_text(json.dumps(config_data, ensure_ascii=False))
+        (tmp_path / "mcp.json").write_text(json.dumps(config_data, ensure_ascii=False))
 
         config = load_config()
         assert "test-üñíçödé" in config.servers

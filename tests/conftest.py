@@ -154,7 +154,7 @@ def valid_config_file(temp_config_dir: Path) -> Path:
             }
         }
     }
-    config_path = temp_config_dir / ".mcp.json"
+    config_path = temp_config_dir / "mcp.json"
     config_path.write_text(json.dumps(config_data))
     return config_path
 
@@ -162,7 +162,7 @@ def valid_config_file(temp_config_dir: Path) -> Path:
 @pytest.fixture
 def invalid_json_config_file(temp_config_dir: Path) -> Path:
     """Create a config file with invalid JSON."""
-    config_path = temp_config_dir / ".mcp.json"
+    config_path = temp_config_dir / "mcp.json"
     config_path.write_text("{ invalid json }")
     return config_path
 
@@ -171,7 +171,7 @@ def invalid_json_config_file(temp_config_dir: Path) -> Path:
 def empty_servers_config_file(temp_config_dir: Path) -> Path:
     """Create a config file with no servers."""
     config_data = {"mcpServers": {}}
-    config_path = temp_config_dir / ".mcp.json"
+    config_path = temp_config_dir / "mcp.json"
     config_path.write_text(json.dumps(config_data))
     return config_path
 
@@ -187,7 +187,7 @@ def malformed_server_config_file(temp_config_dir: Path) -> Path:
             }
         }
     }
-    config_path = temp_config_dir / ".mcp.json"
+    config_path = temp_config_dir / "mcp.json"
     config_path.write_text(json.dumps(config_data))
     return config_path
 

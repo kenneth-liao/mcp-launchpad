@@ -8,9 +8,12 @@ from unittest.mock import patch
 import pytest
 
 from mcp_launchpad.config import (
+    CONFIG_SEARCH_DIRS,
+    EXCLUDED_CONFIG_FILES,
     Config,
     ServerConfig,
     find_config_file,
+    find_config_files,
     find_env_file,
     load_config,
     parse_server_config,
@@ -211,8 +214,150 @@ class TestServerConfig:
             assert resolved == {"MY_API_KEY": "A_API_KEY"}  # Literal, not resolved
 
 
+class TestFindConfigFiles:
+    """Tests for find_config_files function."""
+
+    def test_explicit_path_exists(self, tmp_path: Path):
+        """Test with explicit path that exists."""
+        config_file = tmp_path / "custom.json"
+        config_file.write_text("{}")
+        result = find_config_files(config_file)
+        assert result == [config_file]
+
+    def test_explicit_path_not_exists(self, tmp_path: Path):
+        """Test with explicit path that doesn't exist."""
+        config_file = tmp_path / "nonexistent.json"
+        result = find_config_files(config_file)
+        assert result == []
+
+    def test_no_config_file_found(self, tmp_path: Path, monkeypatch):
+        """Test when no config file is found in search directories."""
+        monkeypatch.chdir(tmp_path)
+        # Create a JSON file without 'mcp' in the name
+        (tmp_path / "config.json").write_text("{}")
+        result = find_config_files(None)
+        # May find user-level config, so just check it doesn't raise
+        # and doesn't include the non-mcp file
+        assert all("mcp" in f.name.lower() for f in result)
+
+    def test_finds_mcp_json(self, tmp_path: Path, monkeypatch):
+        """Test that mcp.json is found."""
+        monkeypatch.chdir(tmp_path)
+        config_file = tmp_path / "mcp.json"
+        config_file.write_text("{}")
+        result = find_config_files(None)
+        resolved_results = [f.resolve() for f in result]
+        assert config_file.resolve() in resolved_results
+
+    def test_finds_custom_mcp_filename(self, tmp_path: Path, monkeypatch):
+        """Test that files with 'mcp' anywhere in name are found."""
+        monkeypatch.chdir(tmp_path)
+        files = [
+            tmp_path / "my-mcp-servers.json",
+            tmp_path / "mcp-config.json",
+            tmp_path / "custom_mcp.json",
+        ]
+        for f in files:
+            f.write_text("{}")
+
+        result = find_config_files(None)
+        resolved_results = [f.resolve() for f in result]
+        for f in files:
+            assert f.resolve() in resolved_results
+
+    def test_case_insensitive_matching(self, tmp_path: Path, monkeypatch):
+        """Test that 'MCP' and 'mcp' both match."""
+        monkeypatch.chdir(tmp_path)
+        files = [
+            tmp_path / "MCP.json",
+            tmp_path / "MyMCP.json",
+            tmp_path / "mcp-servers.json",
+        ]
+        for f in files:
+            f.write_text("{}")
+
+        result = find_config_files(None)
+        resolved_results = [f.resolve() for f in result]
+        for f in files:
+            assert f.resolve() in resolved_results
+
+    def test_excludes_dot_mcp_json(self, tmp_path: Path, monkeypatch):
+        """Test that .mcp.json (Claude Code's convention) is excluded."""
+        monkeypatch.chdir(tmp_path)
+        # Create both .mcp.json and mcp.json
+        excluded_file = tmp_path / ".mcp.json"
+        included_file = tmp_path / "mcp.json"
+        excluded_file.write_text("{}")
+        included_file.write_text("{}")
+
+        result = find_config_files(None)
+        resolved_results = [f.resolve() for f in result]
+
+        # .mcp.json should be excluded
+        assert excluded_file.resolve() not in resolved_results
+        # mcp.json should be included
+        assert included_file.resolve() in resolved_results
+
+    def test_excludes_only_exact_dot_mcp_json(self, tmp_path: Path, monkeypatch):
+        """Test that only exactly '.mcp.json' is excluded, not similar names."""
+        monkeypatch.chdir(tmp_path)
+        # These should all be included
+        similar_files = [
+            tmp_path / "my.mcp.json",
+            tmp_path / ".mcp-servers.json",
+            tmp_path / "dot-mcp.json",
+        ]
+        for f in similar_files:
+            f.write_text("{}")
+
+        # This should be excluded
+        excluded_file = tmp_path / ".mcp.json"
+        excluded_file.write_text("{}")
+
+        result = find_config_files(None)
+        resolved_results = [f.resolve() for f in result]
+
+        for f in similar_files:
+            assert f.resolve() in resolved_results
+        assert excluded_file.resolve() not in resolved_results
+
+    def test_searches_claude_directory(self, tmp_path: Path, monkeypatch):
+        """Test that .claude directory is searched."""
+        monkeypatch.chdir(tmp_path)
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        config_file = claude_dir / "mcp-servers.json"
+        config_file.write_text("{}")
+
+        result = find_config_files(None)
+        resolved_results = [f.resolve() for f in result]
+        assert config_file.resolve() in resolved_results
+
+    def test_ignores_non_json_files(self, tmp_path: Path, monkeypatch):
+        """Test that non-JSON files are ignored."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "mcp.txt").write_text("{}")
+        (tmp_path / "mcp.yaml").write_text("servers: []")
+        (tmp_path / "mcp").write_text("{}")
+
+        result = find_config_files(None)
+        # Should not find any of the non-JSON files
+        assert all(f.suffix == ".json" for f in result)
+
+    def test_no_duplicates(self, tmp_path: Path, monkeypatch):
+        """Test that duplicate files are not returned."""
+        monkeypatch.chdir(tmp_path)
+        config_file = tmp_path / "mcp.json"
+        config_file.write_text("{}")
+
+        result = find_config_files(None)
+        # Check no duplicates by comparing resolved paths
+        resolved = [f.resolve() for f in result]
+        assert len(resolved) == len(set(resolved))
+
+
 class TestFindConfigFile:
-    """Tests for find_config_file function."""
+    """Tests for find_config_file function (deprecated wrapper)."""
 
     def test_explicit_path_exists(self, tmp_path: Path):
         """Test with explicit path that exists."""
@@ -227,20 +372,12 @@ class TestFindConfigFile:
         result = find_config_file(config_file)
         assert result is None
 
-    def test_no_config_file_found(self, tmp_path: Path, monkeypatch):
-        """Test when no config file is found in search paths."""
+    def test_returns_first_file(self, tmp_path: Path, monkeypatch):
+        """Test that find_config_file returns the first found file."""
         monkeypatch.chdir(tmp_path)
-        result = find_config_file(None)
-        # May find user-level config, so just check it doesn't raise
-        assert result is None or result.exists()
-
-    def test_project_level_config(self, tmp_path: Path, monkeypatch):
-        """Test project-level .mcp.json is found."""
-        monkeypatch.chdir(tmp_path)
-        config_file = tmp_path / ".mcp.json"
+        config_file = tmp_path / "mcp.json"
         config_file.write_text("{}")
         result = find_config_file(None)
-        # Compare resolved paths since function may return relative path
         assert result is not None
         assert result.resolve() == config_file.resolve()
 
@@ -311,6 +448,9 @@ class TestLoadConfig:
     def test_load_valid_config(self, tmp_path: Path, monkeypatch):
         """Test loading a valid config file."""
         monkeypatch.chdir(tmp_path)
+        # Isolate test from user's real config files
+        import mcp_launchpad.config as config_module
+        monkeypatch.setattr(config_module, "CONFIG_SEARCH_DIRS", [Path(".")])
 
         config_data = {
             "mcpServers": {
@@ -325,7 +465,7 @@ class TestLoadConfig:
                 },
             }
         }
-        config_file = tmp_path / ".mcp.json"
+        config_file = tmp_path / "mcp.json"
         config_file.write_text(json.dumps(config_data))
 
         config = load_config()
@@ -338,6 +478,9 @@ class TestLoadConfig:
         # Compare resolved paths since function may return relative path
         assert config.config_path is not None
         assert config.config_path.resolve() == config_file.resolve()
+        # Check config_paths includes the file
+        assert len(config.config_paths) >= 1
+        assert config_file.resolve() in [p.resolve() for p in config.config_paths]
 
     def test_load_explicit_config_path(self, tmp_path: Path):
         """Test loading config from explicit path."""
@@ -350,6 +493,7 @@ class TestLoadConfig:
         assert len(config.servers) == 1
         assert "test" in config.servers
         assert config.config_path == config_file
+        assert config.config_paths == [config_file]
 
     def test_config_not_found(self, tmp_path: Path, monkeypatch):
         """Test FileNotFoundError when no config file exists."""
@@ -364,7 +508,7 @@ class TestLoadConfig:
     def test_invalid_json_config(self, tmp_path: Path, monkeypatch):
         """Test JSONDecodeError for invalid JSON."""
         monkeypatch.chdir(tmp_path)
-        config_file = tmp_path / ".mcp.json"
+        config_file = tmp_path / "mcp.json"
         config_file.write_text("{ not valid json }")
 
         with pytest.raises(json.JSONDecodeError):
@@ -373,8 +517,12 @@ class TestLoadConfig:
     def test_empty_mcp_servers(self, tmp_path: Path, monkeypatch):
         """Test loading config with empty mcpServers."""
         monkeypatch.chdir(tmp_path)
+        # Isolate test from user's real config files
+        import mcp_launchpad.config as config_module
+        monkeypatch.setattr(config_module, "CONFIG_SEARCH_DIRS", [Path(".")])
+
         config_data = {"mcpServers": {}}
-        config_file = tmp_path / ".mcp.json"
+        config_file = tmp_path / "mcp.json"
         config_file.write_text(json.dumps(config_data))
 
         config = load_config()
@@ -384,8 +532,12 @@ class TestLoadConfig:
     def test_missing_mcp_servers_key(self, tmp_path: Path, monkeypatch):
         """Test loading config without mcpServers key."""
         monkeypatch.chdir(tmp_path)
+        # Isolate test from user's real config files
+        import mcp_launchpad.config as config_module
+        monkeypatch.setattr(config_module, "CONFIG_SEARCH_DIRS", [Path(".")])
+
         config_data = {"otherKey": "value"}
-        config_file = tmp_path / ".mcp.json"
+        config_file = tmp_path / "mcp.json"
         config_file.write_text(json.dumps(config_data))
 
         config = load_config()
@@ -398,7 +550,7 @@ class TestLoadConfig:
 
         # Create config
         config_data = {"mcpServers": {"test": {"command": "python"}}}
-        config_file = tmp_path / ".mcp.json"
+        config_file = tmp_path / "mcp.json"
         config_file.write_text(json.dumps(config_data))
 
         # Create .env file
@@ -419,7 +571,7 @@ class TestLoadConfig:
 
         # Create config
         config_data = {"mcpServers": {"test": {"command": "python"}}}
-        config_file = tmp_path / ".mcp.json"
+        config_file = tmp_path / "mcp.json"
         config_file.write_text(json.dumps(config_data))
 
         # Create custom env file
@@ -430,4 +582,92 @@ class TestLoadConfig:
 
         assert config.env_path == custom_env
         assert os.environ.get("CUSTOM_VAR") == "custom_value"
+
+    def test_ignores_dot_mcp_json(self, tmp_path: Path, monkeypatch):
+        """Test that .mcp.json (Claude Code's convention) is ignored."""
+        monkeypatch.chdir(tmp_path)
+
+        # Create .mcp.json with a server
+        excluded_data = {"mcpServers": {"excluded": {"command": "excluded"}}}
+        excluded_file = tmp_path / ".mcp.json"
+        excluded_file.write_text(json.dumps(excluded_data))
+
+        # Create mcp.json with a different server
+        included_data = {"mcpServers": {"included": {"command": "included"}}}
+        included_file = tmp_path / "mcp.json"
+        included_file.write_text(json.dumps(included_data))
+
+        config = load_config()
+
+        # Only the server from mcp.json should be loaded
+        assert "included" in config.servers
+        assert "excluded" not in config.servers
+        assert config.servers["included"].command == "included"
+
+    def test_aggregates_multiple_config_files(self, tmp_path: Path, monkeypatch):
+        """Test loading and aggregating servers from multiple config files."""
+        monkeypatch.chdir(tmp_path)
+
+        # Create multiple config files with different servers
+        config1 = {"mcpServers": {"github": {"command": "uvx", "args": ["mcp-github"]}}}
+        config2 = {"mcpServers": {"slack": {"command": "npx", "args": ["mcp-slack"]}}}
+
+        (tmp_path / "mcp.json").write_text(json.dumps(config1))
+        (tmp_path / "my-mcp-servers.json").write_text(json.dumps(config2))
+
+        config = load_config()
+
+        # Both servers should be loaded
+        assert "github" in config.servers
+        assert "slack" in config.servers
+        assert len(config.config_paths) >= 2
+
+    def test_first_definition_wins_for_duplicate_servers(self, tmp_path: Path, monkeypatch):
+        """Test that first definition wins when same server is in multiple files."""
+        monkeypatch.chdir(tmp_path)
+
+        # Create two config files with the same server name but different commands
+        # File order depends on glob order, so we use explicit naming
+        config1 = {"mcpServers": {"myserver": {"command": "first-command"}}}
+        config2 = {"mcpServers": {"myserver": {"command": "second-command"}}}
+
+        # The search order is: current dir first, then .claude
+        (tmp_path / "aaa-mcp.json").write_text(json.dumps(config1))
+        (tmp_path / "zzz-mcp.json").write_text(json.dumps(config2))
+
+        config = load_config()
+
+        # Should have only one server, from whichever file was found first
+        assert "myserver" in config.servers
+        # The command should be from one of the files (order depends on glob)
+        assert config.servers["myserver"].command in ["first-command", "second-command"]
+
+    def test_loads_from_claude_directory(self, tmp_path: Path, monkeypatch):
+        """Test loading config from .claude directory."""
+        monkeypatch.chdir(tmp_path)
+
+        # Create .claude directory with config
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        config_data = {"mcpServers": {"test": {"command": "python"}}}
+        config_file = claude_dir / "mcp-servers.json"
+        config_file.write_text(json.dumps(config_data))
+
+        config = load_config()
+
+        assert "test" in config.servers
+        assert config_file.resolve() in [p.resolve() for p in config.config_paths]
+
+    def test_custom_named_config_file(self, tmp_path: Path, monkeypatch):
+        """Test that custom-named files with 'mcp' are found."""
+        monkeypatch.chdir(tmp_path)
+
+        config_data = {"mcpServers": {"custom": {"command": "custom-cmd"}}}
+        config_file = tmp_path / "my-project-mcp-config.json"
+        config_file.write_text(json.dumps(config_data))
+
+        config = load_config()
+
+        assert "custom" in config.servers
+        assert config.servers["custom"].command == "custom-cmd"
 

@@ -73,7 +73,7 @@ class TestSearchCommand:
 
         # Create config file
         config_data = {"mcpServers": {"github": {"command": "test"}}}
-        (tmp_path / ".mcp.json").write_text(json.dumps(config_data))
+        (tmp_path / "mcp.json").write_text(json.dumps(config_data))
 
         with patch("mcp_launchpad.cli.ToolCache") as MockCache:
             mock_cache = MagicMock()
@@ -93,7 +93,7 @@ class TestSearchCommand:
         monkeypatch.chdir(tmp_path)
 
         config_data = {"mcpServers": {"github": {"command": "test"}}}
-        (tmp_path / ".mcp.json").write_text(json.dumps(config_data))
+        (tmp_path / "mcp.json").write_text(json.dumps(config_data))
 
         with patch("mcp_launchpad.cli.ToolCache") as MockCache:
             mock_cache = MagicMock()
@@ -115,7 +115,7 @@ class TestSearchCommand:
         monkeypatch.chdir(tmp_path)
 
         config_data = {"mcpServers": {"github": {"command": "test"}}}
-        (tmp_path / ".mcp.json").write_text(json.dumps(config_data))
+        (tmp_path / "mcp.json").write_text(json.dumps(config_data))
 
         with patch("mcp_launchpad.cli.ToolCache") as MockCache:
             mock_cache = MagicMock()
@@ -134,7 +134,7 @@ class TestSearchCommand:
         monkeypatch.chdir(tmp_path)
 
         config_data = {"mcpServers": {"github": {"command": "test"}}}
-        (tmp_path / ".mcp.json").write_text(json.dumps(config_data))
+        (tmp_path / "mcp.json").write_text(json.dumps(config_data))
 
         with patch("mcp_launchpad.cli.ToolCache") as MockCache:
             mock_cache = MagicMock()
@@ -158,7 +158,7 @@ class TestSearchCommand:
         monkeypatch.chdir(tmp_path)
 
         config_data = {"mcpServers": {"github": {"command": "test"}}}
-        (tmp_path / ".mcp.json").write_text(json.dumps(config_data))
+        (tmp_path / "mcp.json").write_text(json.dumps(config_data))
 
         with patch("mcp_launchpad.cli.ToolCache") as MockCache:
             mock_cache = MagicMock()
@@ -180,6 +180,9 @@ class TestListCommand:
     ):
         """Test listing all servers."""
         monkeypatch.chdir(tmp_path)
+        # Isolate test from user's real config files
+        import mcp_launchpad.config as config_module
+        monkeypatch.setattr(config_module, "CONFIG_SEARCH_DIRS", [Path(".")])
 
         config_data = {
             "mcpServers": {
@@ -187,7 +190,7 @@ class TestListCommand:
                 "sentry": {"command": "test"},
             }
         }
-        (tmp_path / ".mcp.json").write_text(json.dumps(config_data))
+        (tmp_path / "mcp.json").write_text(json.dumps(config_data))
 
         with patch("mcp_launchpad.cli.ToolCache") as MockCache:
             mock_cache = MagicMock()
@@ -207,7 +210,7 @@ class TestListCommand:
         monkeypatch.chdir(tmp_path)
 
         config_data = {"mcpServers": {"github": {"command": "test"}}}
-        (tmp_path / ".mcp.json").write_text(json.dumps(config_data))
+        (tmp_path / "mcp.json").write_text(json.dumps(config_data))
 
         with patch("mcp_launchpad.cli.ToolCache") as MockCache:
             mock_cache = MagicMock()
@@ -227,7 +230,7 @@ class TestListCommand:
         monkeypatch.chdir(tmp_path)
 
         config_data = {"mcpServers": {"github": {"command": "test"}}}
-        (tmp_path / ".mcp.json").write_text(json.dumps(config_data))
+        (tmp_path / "mcp.json").write_text(json.dumps(config_data))
 
         with patch("mcp_launchpad.cli.ToolCache") as MockCache:
             mock_cache = MagicMock()
@@ -252,7 +255,7 @@ class TestInspectCommand:
         monkeypatch.chdir(tmp_path)
 
         config_data = {"mcpServers": {"github": {"command": "test"}}}
-        (tmp_path / ".mcp.json").write_text(json.dumps(config_data))
+        (tmp_path / "mcp.json").write_text(json.dumps(config_data))
 
         with patch("mcp_launchpad.cli.ToolCache") as MockCache:
             mock_cache = MagicMock()
@@ -273,7 +276,7 @@ class TestInspectCommand:
         monkeypatch.chdir(tmp_path)
 
         config_data = {"mcpServers": {"github": {"command": "test"}}}
-        (tmp_path / ".mcp.json").write_text(json.dumps(config_data))
+        (tmp_path / "mcp.json").write_text(json.dumps(config_data))
 
         with patch("mcp_launchpad.cli.ToolCache") as MockCache:
             mock_cache = MagicMock()
@@ -295,7 +298,7 @@ class TestInspectCommand:
         monkeypatch.chdir(tmp_path)
 
         config_data = {"mcpServers": {"github": {"command": "test"}}}
-        (tmp_path / ".mcp.json").write_text(json.dumps(config_data))
+        (tmp_path / "mcp.json").write_text(json.dumps(config_data))
 
         with patch("mcp_launchpad.cli.ToolCache") as MockCache, patch(
             "mcp_launchpad.cli.ConnectionManager"
@@ -328,7 +331,7 @@ class TestCallCommand:
         monkeypatch.chdir(tmp_path)
 
         config_data = {"mcpServers": {"github": {"command": "test"}}}
-        (tmp_path / ".mcp.json").write_text(json.dumps(config_data))
+        (tmp_path / "mcp.json").write_text(json.dumps(config_data))
 
         with patch("mcp_launchpad.cli.SessionClient") as MockSession:
             mock_session = MagicMock()
@@ -353,7 +356,7 @@ class TestCallCommand:
         monkeypatch.chdir(tmp_path)
 
         config_data = {"mcpServers": {"test": {"command": "test"}}}
-        (tmp_path / ".mcp.json").write_text(json.dumps(config_data))
+        (tmp_path / "mcp.json").write_text(json.dumps(config_data))
 
         with patch("mcp_launchpad.cli.SessionClient") as MockSession:
             mock_session = MagicMock()
@@ -371,7 +374,7 @@ class TestCallCommand:
         monkeypatch.chdir(tmp_path)
 
         config_data = {"mcpServers": {"github": {"command": "test"}}}
-        (tmp_path / ".mcp.json").write_text(json.dumps(config_data))
+        (tmp_path / "mcp.json").write_text(json.dumps(config_data))
 
         result = runner.invoke(
             main, ["call", "github", "create_issue", "{ not valid json }"]
@@ -387,7 +390,7 @@ class TestCallCommand:
         monkeypatch.chdir(tmp_path)
 
         config_data = {"mcpServers": {"github": {"command": "test"}}}
-        (tmp_path / ".mcp.json").write_text(json.dumps(config_data))
+        (tmp_path / "mcp.json").write_text(json.dumps(config_data))
 
         with patch("mcp_launchpad.cli.SessionClient") as MockSession:
             mock_session = MagicMock()
@@ -408,7 +411,7 @@ class TestCallCommand:
         monkeypatch.chdir(tmp_path)
 
         config_data = {"mcpServers": {"github": {"command": "test"}}}
-        (tmp_path / ".mcp.json").write_text(json.dumps(config_data))
+        (tmp_path / "mcp.json").write_text(json.dumps(config_data))
 
         with patch("mcp_launchpad.cli.SessionClient") as MockSession:
             mock_session = MagicMock()
@@ -429,8 +432,11 @@ class TestConfigErrors:
     def test_invalid_json_config(self, runner: CliRunner, tmp_path: Path, monkeypatch):
         """Test error when config file has invalid JSON."""
         monkeypatch.chdir(tmp_path)
+        # Isolate test from user's real config files
+        import mcp_launchpad.config as config_module
+        monkeypatch.setattr(config_module, "CONFIG_SEARCH_DIRS", [Path(".")])
 
-        (tmp_path / ".mcp.json").write_text("{ invalid json }")
+        (tmp_path / "mcp.json").write_text("{ invalid json }")
 
         result = runner.invoke(main, ["list"])
 
