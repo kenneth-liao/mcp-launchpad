@@ -1,4 +1,4 @@
-# MCP Launchpad
+# MCP Launchpad  (Your gateway to ALL MCPs!)
 
 You have access to the MCP Launchpad (`mcpl`), a unified CLI for discovering and executing tools from multiple MCP servers. The user may configure and change their MCP configuration at any time. So if your task requires a tool or functionality outside of your current capabilities, it's critical that you always check the MCP Launchpad for available tools that may be useful.
 
