@@ -67,6 +67,45 @@ mcpl search "github issues" --limit 10
 mcpl call github list_issues '{"owner": "anthropics", "repo": "claude-code"}'
 ```
 
+## MCPL with Claude Code
+
+MCP Launchpad works great with [Claude Code](https://claude.com/claude-code), giving Claude access to all your configured MCP tools via bash commands. To enable this, copy the included `CLAUDE.md` file which provides Claude with instructions on how to use `mcpl`.
+
+### Option 1: Project-Level Setup
+
+Copy `CLAUDE.md` to your project root:
+
+```bash
+curl -o CLAUDE.md https://raw.githubusercontent.com/kenneth-liao/mcp-launchpad/main/CLAUDE.md
+```
+
+This teaches Claude how to use `mcpl` within that specific project.
+
+### Option 2: Global Setup
+
+Copy `CLAUDE.md` to your user-level Claude directory:
+
+```bash
+curl -o ~/.claude/CLAUDE.md https://raw.githubusercontent.com/kenneth-liao/mcp-launchpad/main/CLAUDE.md
+```
+
+This makes `mcpl` available to Claude Code across all your projects.
+
+### What This Enables
+
+With the `CLAUDE.md` instructions in place, Claude Code can:
+
+- **Search for tools** across all your MCP servers
+- **Execute tools** by calling `mcpl` via bash
+- **Discover capabilities** dynamically as you add new MCP servers
+- **Handle errors** gracefully with built-in troubleshooting guidance
+
+Example interaction with Claude Code:
+```
+You: List my open GitHub issues
+Claude: [searches for github tools, then calls mcpl to list issues]
+```
+
 ## Commands
 
 ### `mcpl search <query>`
