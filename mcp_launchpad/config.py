@@ -86,7 +86,7 @@ def find_config_files(explicit_path: Path | None = None) -> list[Path]:
     """
     if explicit_path:
         if explicit_path.exists():
-            return [explicit_path]
+            return [explicit_path.resolve()]
         return []
 
     found_files: list[Path] = []
@@ -111,7 +111,7 @@ def find_config_files(explicit_path: Path | None = None) -> list[Path]:
                 continue
             seen_resolved.add(resolved)
 
-            found_files.append(json_file)
+            found_files.append(resolved)
 
     return found_files
 
@@ -130,19 +130,19 @@ def find_env_files(explicit_path: Path | None = None) -> list[Path]:
     """
     if explicit_path:
         if explicit_path.exists():
-            return [explicit_path]
+            return [explicit_path.resolve()]
         return []
 
     found: list[Path] = []
     # Load global env first (provides defaults)
     global_env = Path.home() / ".claude" / ".env"
     if global_env.exists():
-        found.append(global_env)
+        found.append(global_env.resolve())
 
     # Load local env second (can override globals)
     local_env = Path(".env")
     if local_env.exists():
-        found.append(local_env)
+        found.append(local_env.resolve())
 
     return found
 
