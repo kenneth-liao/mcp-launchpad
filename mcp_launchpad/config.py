@@ -32,12 +32,26 @@ def _resolve_env_vars(value: str) -> str:
 
 @dataclass
 class ServerConfig:
-    """Configuration for a single MCP server."""
+    """Configuration for a single MCP server.
+
+    Supports two transport types:
+    - stdio: Local process-based servers (command + args)
+    - http: Remote HTTP-based servers (url + optional headers)
+    """
 
     name: str
-    command: str
+    # Stdio transport fields
+    command: str = ""
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
+    # HTTP transport fields
+    server_type: str = "stdio"  # "stdio" or "http"
+    url: str = ""
+    headers: dict[str, str] = field(default_factory=dict)
+
+    def is_http(self) -> bool:
+        """Check if this is an HTTP-based server."""
+        return self.server_type == "http"
 
     def get_resolved_env(self) -> dict[str, str]:
         """Resolve environment variables, expanding ${VAR} references."""
@@ -46,6 +60,14 @@ class ServerConfig:
     def get_resolved_args(self) -> list[str]:
         """Resolve environment variables in args, expanding ${VAR} references."""
         return [_resolve_env_vars(arg) for arg in self.args]
+
+    def get_resolved_url(self) -> str:
+        """Resolve environment variables in URL."""
+        return _resolve_env_vars(self.url)
+
+    def get_resolved_headers(self) -> dict[str, str]:
+        """Resolve environment variables in headers."""
+        return {key: _resolve_env_vars(value) for key, value in self.headers.items()}
 
 
 @dataclass
@@ -157,12 +179,24 @@ def find_env_file(explicit_path: Path | None = None) -> Path | None:
 
 
 def parse_server_config(name: str, data: dict[str, Any]) -> ServerConfig:
-    """Parse a server configuration from JSON data."""
+    """Parse a server configuration from JSON data.
+
+    Supports both stdio and HTTP transport types:
+    - stdio (default): Uses command, args, env
+    - http: Uses url, headers
+    """
+    server_type = data.get("type", "stdio")
+
     return ServerConfig(
         name=name,
+        # Stdio fields
         command=data.get("command", ""),
         args=data.get("args", []),
         env=data.get("env", {}),
+        # HTTP fields
+        server_type=server_type,
+        url=data.get("url", ""),
+        headers=data.get("headers", {}),
     )
 
 

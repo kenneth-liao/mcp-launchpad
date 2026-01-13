@@ -211,6 +211,84 @@ class TestServerConfig:
             resolved = config.get_resolved_env()
             assert resolved == {"MY_API_KEY": "A_API_KEY"}  # Literal, not resolved
 
+    # HTTP server support tests
+    def test_is_http_false_for_stdio(self):
+        """Test that is_http returns False for stdio servers."""
+        config = ServerConfig(name="test", command="python")
+        assert config.is_http() is False
+
+    def test_is_http_true_for_http_type(self):
+        """Test that is_http returns True for HTTP servers."""
+        config = ServerConfig(
+            name="test",
+            server_type="http",
+            url="https://example.com/mcp",
+        )
+        assert config.is_http() is True
+
+    def test_get_resolved_url_static(self):
+        """Test resolving static URL."""
+        config = ServerConfig(
+            name="test",
+            server_type="http",
+            url="https://example.com/mcp",
+        )
+        assert config.get_resolved_url() == "https://example.com/mcp"
+
+    def test_get_resolved_url_with_variable(self):
+        """Test resolving URL with environment variable."""
+        with patch.dict(os.environ, {"PROJECT_REF": "abc123"}, clear=True):
+            config = ServerConfig(
+                name="test",
+                server_type="http",
+                url="https://mcp.example.com/mcp?project_ref=${PROJECT_REF}",
+            )
+            resolved = config.get_resolved_url()
+            assert resolved == "https://mcp.example.com/mcp?project_ref=abc123"
+
+    def test_get_resolved_headers_static(self):
+        """Test resolving static headers."""
+        config = ServerConfig(
+            name="test",
+            server_type="http",
+            url="https://example.com/mcp",
+            headers={"Content-Type": "application/json"},
+        )
+        resolved = config.get_resolved_headers()
+        assert resolved == {"Content-Type": "application/json"}
+
+    def test_get_resolved_headers_with_variable(self):
+        """Test resolving headers with environment variables."""
+        with patch.dict(os.environ, {"ACCESS_TOKEN": "secret-token"}, clear=True):
+            config = ServerConfig(
+                name="test",
+                server_type="http",
+                url="https://example.com/mcp",
+                headers={"Authorization": "Bearer ${ACCESS_TOKEN}"},
+            )
+            resolved = config.get_resolved_headers()
+            assert resolved == {"Authorization": "Bearer secret-token"}
+
+    def test_get_resolved_headers_missing_variable(self):
+        """Test resolving headers with missing variable resolves to empty."""
+        with patch.dict(os.environ, {}, clear=True):
+            config = ServerConfig(
+                name="test",
+                server_type="http",
+                url="https://example.com/mcp",
+                headers={"Authorization": "Bearer ${MISSING_TOKEN}"},
+            )
+            resolved = config.get_resolved_headers()
+            assert resolved == {"Authorization": "Bearer "}
+
+    def test_http_config_default_values(self):
+        """Test that HTTP config has correct defaults."""
+        config = ServerConfig(name="test", server_type="http", url="https://example.com")
+        assert config.headers == {}
+        assert config.command == ""
+        assert config.args == []
+        assert config.env == {}
+
 
 class TestFindConfigFiles:
     """Tests for find_config_files function."""
@@ -527,6 +605,38 @@ class TestParseServerConfig:
         assert config.command == ""
         assert config.args == ["some-arg"]
 
+    def test_http_type_config(self):
+        """Test parsing HTTP type server config."""
+        data = {
+            "type": "http",
+            "url": "https://mcp.example.com/mcp",
+            "headers": {"Authorization": "Bearer ${TOKEN}"},
+        }
+        config = parse_server_config("http-server", data)
+        assert config.name == "http-server"
+        assert config.server_type == "http"
+        assert config.url == "https://mcp.example.com/mcp"
+        assert config.headers == {"Authorization": "Bearer ${TOKEN}"}
+        assert config.is_http() is True
+
+    def test_http_type_without_headers(self):
+        """Test parsing HTTP type server config without headers."""
+        data = {
+            "type": "http",
+            "url": "https://mcp.example.com/mcp",
+        }
+        config = parse_server_config("http-server", data)
+        assert config.server_type == "http"
+        assert config.url == "https://mcp.example.com/mcp"
+        assert config.headers == {}
+
+    def test_default_type_is_stdio(self):
+        """Test that default type is stdio when not specified."""
+        data = {"command": "python", "args": ["-m", "server"]}
+        config = parse_server_config("stdio-server", data)
+        assert config.server_type == "stdio"
+        assert config.is_http() is False
+
 
 class TestLoadConfig:
     """Tests for load_config function."""
@@ -767,3 +877,43 @@ class TestLoadConfig:
 
         assert "custom" in config.servers
         assert config.servers["custom"].command == "custom-cmd"
+
+    def test_load_http_type_server(self, tmp_path: Path, monkeypatch):
+        """Test loading HTTP type server from config file."""
+        monkeypatch.chdir(tmp_path)
+        import mcp_launchpad.config as config_module
+
+        monkeypatch.setattr(config_module, "CONFIG_SEARCH_DIRS", [Path(".")])
+
+        config_data = {
+            "mcpServers": {
+                "supabase": {
+                    "type": "http",
+                    "url": "https://mcp.supabase.com/mcp?project_ref=abc123",
+                    "headers": {"Authorization": "Bearer ${SUPABASE_TOKEN}"},
+                },
+                "github": {
+                    "command": "uvx",
+                    "args": ["mcp-server-github"],
+                },
+            }
+        }
+        config_file = tmp_path / "mcp.json"
+        config_file.write_text(json.dumps(config_data))
+
+        config = load_config()
+
+        # Check HTTP server
+        assert "supabase" in config.servers
+        supabase = config.servers["supabase"]
+        assert supabase.server_type == "http"
+        assert supabase.is_http() is True
+        assert supabase.url == "https://mcp.supabase.com/mcp?project_ref=abc123"
+        assert supabase.headers == {"Authorization": "Bearer ${SUPABASE_TOKEN}"}
+
+        # Check stdio server
+        assert "github" in config.servers
+        github = config.servers["github"]
+        assert github.server_type == "stdio"
+        assert github.is_http() is False
+        assert github.command == "uvx"

@@ -774,17 +774,26 @@ def show_config(ctx: click.Context, show_secrets: bool) -> None:
         servers_data = {}
         for name, server in config.servers.items():
             server_info: dict[str, Any] = {
-                "command": server.command,
-                "args": server.args,
+                "type": server.server_type,
                 "disabled": state.is_disabled(name),
             }
-            if show_secrets:
-                server_info["env"] = server.get_resolved_env()
+            if server.is_http():
+                server_info["url"] = server.url
+                if show_secrets:
+                    server_info["headers"] = server.get_resolved_headers()
+                else:
+                    server_info["headers"] = {
+                        k: "***" if v else "" for k, v in server.headers.items()
+                    }
             else:
-                # Mask env values
-                server_info["env"] = {
-                    k: "***" if v else "" for k, v in server.env.items()
-                }
+                server_info["command"] = server.command
+                server_info["args"] = server.args
+                if show_secrets:
+                    server_info["env"] = server.get_resolved_env()
+                else:
+                    server_info["env"] = {
+                        k: "***" if v else "" for k, v in server.env.items()
+                    }
             servers_data[name] = server_info
 
         output.success(
@@ -809,30 +818,50 @@ def show_config(ctx: click.Context, show_secrets: bool) -> None:
                 click.secho(" (disabled)", fg="red")
             else:
                 click.echo()
-            click.echo(f"    command: {server.command}")
-            if server.args:
-                click.echo(f"    args: {' '.join(server.args)}")
 
-            if server.env:
-                click.echo("    env:")
-                if show_secrets:
-                    resolved = server.get_resolved_env()
-                    for key, value in server.env.items():
-                        resolved_value = resolved.get(key, "")
-                        if "${" in value:
-                            # Show both template and resolved value
-                            click.secho(f"      {key}: ", nl=False)
-                            click.secho(f"{resolved_value}", fg="yellow")
-                        else:
-                            click.echo(f"      {key}: {value}")
-                else:
-                    for key, value in server.env.items():
-                        if "${" in value:
-                            # Show it's a variable reference
-                            click.echo(f"      {key}: {value}")
-                        else:
-                            # Mask literal values
-                            click.echo(f"      {key}: ***")
+            if server.is_http():
+                # HTTP server display
+                click.echo("    type: http")
+                click.echo(f"    url: {server.url}")
+                if server.headers:
+                    click.echo("    headers:")
+                    if show_secrets:
+                        resolved = server.get_resolved_headers()
+                        for key, value in server.headers.items():
+                            resolved_value = resolved.get(key, "")
+                            if "${" in value:
+                                click.secho(f"      {key}: ", nl=False)
+                                click.secho(f"{resolved_value}", fg="yellow")
+                            else:
+                                click.echo(f"      {key}: {value}")
+                    else:
+                        for key, value in server.headers.items():
+                            if "${" in value:
+                                click.echo(f"      {key}: {value}")
+                            else:
+                                click.echo(f"      {key}: ***")
+            else:
+                # Stdio server display
+                click.echo(f"    command: {server.command}")
+                if server.args:
+                    click.echo(f"    args: {' '.join(server.args)}")
+                if server.env:
+                    click.echo("    env:")
+                    if show_secrets:
+                        resolved = server.get_resolved_env()
+                        for key, value in server.env.items():
+                            resolved_value = resolved.get(key, "")
+                            if "${" in value:
+                                click.secho(f"      {key}: ", nl=False)
+                                click.secho(f"{resolved_value}", fg="yellow")
+                            else:
+                                click.echo(f"      {key}: {value}")
+                    else:
+                        for key, value in server.env.items():
+                            if "${" in value:
+                                click.echo(f"      {key}: {value}")
+                            else:
+                                click.echo(f"      {key}: ***")
             click.echo()
 
 

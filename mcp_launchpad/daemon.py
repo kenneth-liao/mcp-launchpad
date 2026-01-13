@@ -12,10 +12,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO, cast
 
+import httpx
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from mcp.client.streamable_http import streamable_http_client
 
-from .config import Config, load_config
+from .config import Config, ServerConfig, load_config
 from .ipc import IPCMessage, create_ipc_server
 from .platform import (
     IS_WINDOWS,
@@ -58,7 +60,8 @@ class ServerState:
     session: ClientSession | None = None
     read_stream: Any = None
     write_stream: Any = None
-    stderr_file: Any = None
+    stderr_file: Any = None  # For stdio servers
+    http_client: httpx.AsyncClient | None = None  # For HTTP servers
     connected: bool = False
     error: str | None = None
 
@@ -145,6 +148,107 @@ class Daemon:
     async def _connect_server(self, server_name: str) -> None:
         """Connect to a single MCP server and maintain the connection with auto-restart."""
         server_config = self.state.config.servers[server_name]
+
+        if server_config.is_http():
+            await self._connect_http_server(server_name, server_config)
+        else:
+            await self._connect_stdio_server(server_name, server_config)
+
+    async def _connect_http_server(
+        self, server_name: str, server_config: ServerConfig
+    ) -> None:
+        """Connect to an HTTP-based MCP server."""
+        attempt = 0
+        url = server_config.get_resolved_url()
+        headers = server_config.get_resolved_headers()
+
+        if not url:
+            server_state = ServerState(
+                name=server_name,
+                error="HTTP server is missing 'url' in configuration",
+            )
+            self.state.servers[server_name] = server_state
+            return
+
+        while self.state.running and attempt < MAX_RECONNECT_ATTEMPTS:
+            attempt += 1
+
+            server_state = self.state.servers.get(server_name)
+            if not server_state:
+                server_state = ServerState(name=server_name)
+                self.state.servers[server_name] = server_state
+            else:
+                server_state.error = None
+
+            # Create httpx client with headers
+            http_client = httpx.AsyncClient(
+                headers=headers,
+                timeout=httpx.Timeout(CONNECTION_TIMEOUT, connect=30.0),
+            )
+            server_state.http_client = http_client
+
+            try:
+                async with asyncio.timeout(CONNECTION_TIMEOUT):
+                    async with streamable_http_client(
+                        url, http_client=http_client, terminate_on_close=False
+                    ) as (read, write, _get_session_id):
+                        async with ClientSession(read, write) as session:
+                            await session.initialize()
+
+                            server_state.session = session
+                            server_state.connected = True
+                            attempt = 0  # Reset on success
+                            logger.info(f"Connected to HTTP server: {server_name}")
+
+                            # Keep connection alive until daemon shuts down
+                            while self.state.running:
+                                await asyncio.sleep(1)
+
+                            # Clean exit
+                            return
+
+            except TimeoutError:
+                server_state.error = (
+                    f"Connection timed out after {CONNECTION_TIMEOUT}s.\n"
+                    f"URL: {url}"
+                )
+                logger.error(f"Server {server_name}: {server_state.error}")
+            except httpx.ConnectError as e:
+                server_state.error = (
+                    f"Could not connect to HTTP server.\n"
+                    f"URL: {url}\n"
+                    f"Error: {e}"
+                )
+                logger.error(f"Server {server_name}: {server_state.error}")
+            except asyncio.CancelledError:
+                logger.debug(f"Server {server_name}: connection task cancelled")
+                return
+            except Exception as e:
+                server_state.error = str(e)
+                logger.error(f"Server {server_name} error: {e}")
+            finally:
+                server_state.connected = False
+                server_state.session = None
+                await http_client.aclose()
+                server_state.http_client = None
+
+            # Wait before retrying
+            if self.state.running and attempt < MAX_RECONNECT_ATTEMPTS:
+                logger.info(
+                    f"Server {server_name}: retrying in {RECONNECT_DELAY}s "
+                    f"(attempt {attempt}/{MAX_RECONNECT_ATTEMPTS})"
+                )
+                await asyncio.sleep(RECONNECT_DELAY)
+
+        if attempt >= MAX_RECONNECT_ATTEMPTS:
+            logger.error(
+                f"Server {server_name}: max reconnection attempts reached, giving up"
+            )
+
+    async def _connect_stdio_server(
+        self, server_name: str, server_config: ServerConfig
+    ) -> None:
+        """Connect to a stdio-based MCP server."""
         attempt = 0
 
         while self.state.running and attempt < MAX_RECONNECT_ATTEMPTS:
@@ -591,15 +695,23 @@ class Daemon:
             )
             self._connection_tasks.clear()
 
-        # Close all server connections and clean up stderr files
+        # Close all server connections and clean up resources
         for state in self.state.servers.values():
             state.session = None
+            # Clean up stdio server stderr files
             if state.stderr_file:
                 try:
                     state.stderr_file.close()
                     Path(state.stderr_file.name).unlink(missing_ok=True)
                 except Exception as e:
                     logger.debug(f"Failed to cleanup stderr file for {state.name}: {e}")
+            # Clean up HTTP server clients
+            if state.http_client:
+                try:
+                    await state.http_client.aclose()
+                except Exception as e:
+                    logger.debug(f"Failed to cleanup HTTP client for {state.name}: {e}")
+                state.http_client = None
 
         # Remove PID file
         self._remove_pid_file()
