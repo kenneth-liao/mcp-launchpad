@@ -9,6 +9,8 @@ dependencies = [
     "click>=8.1.0",
     "rank-bm25>=0.2.2",
     "python-dotenv>=1.0.0",
+    "cryptography>=41.0.0",
+    "keyring>=24.0.0",
 ]
 
 [project.optional-dependencies]
