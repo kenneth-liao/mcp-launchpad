@@ -22,12 +22,26 @@ MAX_SESSION_ID_LEN = 16
 
 
 def is_ide_environment() -> bool:
-    """Check if running in an IDE environment (VS Code, Claude Code, etc.).
+    """Check if running in an IDE or persistent terminal environment.
 
-    In IDE environments, the daemon should not shut down when its immediate
+    In these environments, the daemon should not shut down when its immediate
     parent process dies, because each terminal command runs in a separate
-    subprocess. Instead, the daemon should stay alive for the entire IDE session.
+    subprocess. Instead, the daemon should stay alive using idle timeout.
+
+    Detected environments:
+    - VS Code (VSCODE_GIT_IPC_HANDLE or VSCODE_INJECTION)
+    - Claude Code (CLAUDECODE)
+    - Windows Terminal (WT_SESSION)
+    - Explicit opt-in (MCPL_PERSIST)
     """
+    # Explicit persistent mode requested
+    if os.environ.get("MCPL_PERSIST"):
+        return True
+
+    # Windows Terminal has stable session ID - use idle timeout
+    if os.environ.get("WT_SESSION"):
+        return True
+
     # VS Code sets VSCODE_GIT_IPC_HANDLE
     if os.environ.get("VSCODE_GIT_IPC_HANDLE"):
         return True

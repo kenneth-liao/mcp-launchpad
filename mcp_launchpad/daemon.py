@@ -650,10 +650,10 @@ class Daemon:
 
         if anchor:
             logger.info(
-                f"IDE environment detected - monitoring session anchor: {anchor}"
+                f"Persistent mode - monitoring session anchor: {anchor}"
             )
         else:
-            logger.info("IDE environment detected - monitoring idle timeout only")
+            logger.info("Persistent mode - monitoring idle timeout only")
 
         if IDLE_TIMEOUT > 0:
             logger.info(f"Idle timeout enabled: {IDLE_TIMEOUT}s")

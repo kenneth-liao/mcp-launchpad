@@ -40,6 +40,8 @@ class TestIsIdeEnvironment:
         monkeypatch.delenv("VSCODE_GIT_IPC_HANDLE", raising=False)
         monkeypatch.delenv("CLAUDECODE", raising=False)
         monkeypatch.delenv("VSCODE_INJECTION", raising=False)
+        monkeypatch.delenv("MCPL_PERSIST", raising=False)
+        monkeypatch.delenv("WT_SESSION", raising=False)
         assert is_ide_environment() is False
 
         monkeypatch.setenv("VSCODE_GIT_IPC_HANDLE", "/tmp/vscode-git-abc123.sock")
@@ -50,6 +52,8 @@ class TestIsIdeEnvironment:
         monkeypatch.delenv("VSCODE_GIT_IPC_HANDLE", raising=False)
         monkeypatch.delenv("CLAUDECODE", raising=False)
         monkeypatch.delenv("VSCODE_INJECTION", raising=False)
+        monkeypatch.delenv("MCPL_PERSIST", raising=False)
+        monkeypatch.delenv("WT_SESSION", raising=False)
         assert is_ide_environment() is False
 
         monkeypatch.setenv("CLAUDECODE", "1")
@@ -60,9 +64,35 @@ class TestIsIdeEnvironment:
         monkeypatch.delenv("VSCODE_GIT_IPC_HANDLE", raising=False)
         monkeypatch.delenv("CLAUDECODE", raising=False)
         monkeypatch.delenv("VSCODE_INJECTION", raising=False)
+        monkeypatch.delenv("MCPL_PERSIST", raising=False)
+        monkeypatch.delenv("WT_SESSION", raising=False)
         assert is_ide_environment() is False
 
         monkeypatch.setenv("VSCODE_INJECTION", "1")
+        assert is_ide_environment() is True
+
+    def test_detects_windows_terminal(self, monkeypatch):
+        """Test detection of Windows Terminal via WT_SESSION."""
+        monkeypatch.delenv("VSCODE_GIT_IPC_HANDLE", raising=False)
+        monkeypatch.delenv("CLAUDECODE", raising=False)
+        monkeypatch.delenv("VSCODE_INJECTION", raising=False)
+        monkeypatch.delenv("MCPL_PERSIST", raising=False)
+        monkeypatch.delenv("WT_SESSION", raising=False)
+        assert is_ide_environment() is False
+
+        monkeypatch.setenv("WT_SESSION", "some-guid-value")
+        assert is_ide_environment() is True
+
+    def test_detects_mcpl_persist_env(self, monkeypatch):
+        """Test detection of persistent mode via MCPL_PERSIST env var."""
+        monkeypatch.delenv("VSCODE_GIT_IPC_HANDLE", raising=False)
+        monkeypatch.delenv("CLAUDECODE", raising=False)
+        monkeypatch.delenv("VSCODE_INJECTION", raising=False)
+        monkeypatch.delenv("MCPL_PERSIST", raising=False)
+        monkeypatch.delenv("WT_SESSION", raising=False)
+        assert is_ide_environment() is False
+
+        monkeypatch.setenv("MCPL_PERSIST", "1")
         assert is_ide_environment() is True
 
 
