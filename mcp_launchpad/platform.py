@@ -120,6 +120,25 @@ def _shorten_session_id(session_id: str) -> str:
     return hashlib.md5(session_id.encode(), usedforsecurity=False).hexdigest()[:MAX_SESSION_ID_LEN]
 
 
+def _get_safe_username() -> str:
+    """Get a filesystem/pipe-safe username identifier.
+
+    Windows named pipes don't support non-ASCII characters in pipe names.
+    This function returns the username directly if it contains only ASCII
+    characters and no spaces. Otherwise, returns a short hash of the username.
+    """
+    if IS_WINDOWS:
+        username = os.environ.get("USERNAME", "user")
+    else:
+        username = os.environ.get("USER", "user")
+
+    if username.isascii() and " " not in username:
+        return username
+
+    # Hash non-ASCII or space-containing usernames to ensure safe paths
+    return hashlib.sha256(username.encode("utf-8")).hexdigest()[:12]
+
+
 def get_socket_path() -> Path:
     r"""Get the path for the daemon socket/pipe.
 
@@ -133,7 +152,7 @@ def get_socket_path() -> Path:
     session_id = _shorten_session_id(get_session_id())
 
     if IS_WINDOWS:
-        username = os.environ.get("USERNAME", "user")
+        username = _get_safe_username()
         # Windows named pipes use a special path format
         return Path(f"\\\\.\\pipe\\mcpl-{username}-{session_id}")
     else:
@@ -152,7 +171,7 @@ def get_pid_file_path() -> Path:
     session_id = _shorten_session_id(get_session_id())
 
     if IS_WINDOWS:
-        username = os.environ.get("USERNAME", "user")
+        username = _get_safe_username()
         temp_dir = Path(tempfile.gettempdir())
         return temp_dir / f"mcpl-{username}-{session_id}.pid"
     else:
@@ -169,7 +188,7 @@ def get_log_file_path() -> Path:
     session_id = _shorten_session_id(get_session_id())
 
     if IS_WINDOWS:
-        username = os.environ.get("USERNAME", "user")
+        username = _get_safe_username()
         temp_dir = Path(tempfile.gettempdir())
         return temp_dir / f"mcpl-{username}-{session_id}.log"
     else:

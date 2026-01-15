@@ -8,6 +8,7 @@ import pytest
 from mcp_launchpad.platform import (
     IS_WINDOWS,
     MAX_SESSION_ID_LEN,
+    _get_safe_username,
     _shorten_session_id,
     get_ide_session_anchor,
     get_legacy_pid_file_path,
@@ -332,6 +333,109 @@ class TestShortenSessionId:
         """Test that empty string is handled correctly."""
         result = _shorten_session_id("")
         assert result == ""
+
+
+class TestGetSafeUsername:
+    """Tests for _get_safe_username function."""
+
+    def test_ascii_username_unchanged(self, monkeypatch):
+        """Test that ASCII-only usernames are returned unchanged."""
+        if IS_WINDOWS:
+            monkeypatch.setenv("USERNAME", "johndoe")
+        else:
+            monkeypatch.setenv("USER", "johndoe")
+        result = _get_safe_username()
+        assert result == "johndoe"
+
+    def test_non_ascii_username_is_hashed(self, monkeypatch):
+        """Test that non-ASCII usernames are hashed."""
+        if IS_WINDOWS:
+            monkeypatch.setenv("USERNAME", "Iván")
+        else:
+            monkeypatch.setenv("USER", "Iván")
+        result = _get_safe_username()
+        # Should be a 12-char hex hash
+        assert len(result) == 12
+        assert all(c in "0123456789abcdef" for c in result)
+        # Original should not appear
+        assert "Iván" not in result
+
+    def test_username_with_space_is_hashed(self, monkeypatch):
+        """Test that usernames with spaces are hashed."""
+        if IS_WINDOWS:
+            monkeypatch.setenv("USERNAME", "John Doe")
+        else:
+            monkeypatch.setenv("USER", "John Doe")
+        result = _get_safe_username()
+        # Should be a 12-char hex hash
+        assert len(result) == 12
+        assert all(c in "0123456789abcdef" for c in result)
+        # Original should not appear
+        assert "John Doe" not in result
+
+    def test_non_ascii_with_space_is_hashed(self, monkeypatch):
+        """Test that non-ASCII usernames with spaces are hashed."""
+        if IS_WINDOWS:
+            monkeypatch.setenv("USERNAME", "Iván Blanco")
+        else:
+            monkeypatch.setenv("USER", "Iván Blanco")
+        result = _get_safe_username()
+        # Should be a 12-char hex hash
+        assert len(result) == 12
+        assert all(c in "0123456789abcdef" for c in result)
+
+    def test_hashing_is_deterministic(self, monkeypatch):
+        """Test that hashing produces consistent results."""
+        if IS_WINDOWS:
+            monkeypatch.setenv("USERNAME", "用户名")
+        else:
+            monkeypatch.setenv("USER", "用户名")
+        result1 = _get_safe_username()
+        result2 = _get_safe_username()
+        assert result1 == result2
+
+    def test_different_usernames_produce_different_hashes(self, monkeypatch):
+        """Test that different non-ASCII usernames produce different hashes."""
+        if IS_WINDOWS:
+            monkeypatch.setenv("USERNAME", "Müller")
+            result1 = _get_safe_username()
+            monkeypatch.setenv("USERNAME", "Müllér")
+            result2 = _get_safe_username()
+        else:
+            monkeypatch.setenv("USER", "Müller")
+            result1 = _get_safe_username()
+            monkeypatch.setenv("USER", "Müllér")
+            result2 = _get_safe_username()
+        assert result1 != result2
+
+    def test_default_username_when_env_not_set(self, monkeypatch):
+        """Test fallback to 'user' when environment variable is not set."""
+        if IS_WINDOWS:
+            monkeypatch.delenv("USERNAME", raising=False)
+        else:
+            monkeypatch.delenv("USER", raising=False)
+        result = _get_safe_username()
+        assert result == "user"
+
+    def test_cyrillic_username_is_hashed(self, monkeypatch):
+        """Test that Cyrillic usernames are hashed."""
+        if IS_WINDOWS:
+            monkeypatch.setenv("USERNAME", "Пользователь")
+        else:
+            monkeypatch.setenv("USER", "Пользователь")
+        result = _get_safe_username()
+        assert len(result) == 12
+        assert all(c in "0123456789abcdef" for c in result)
+
+    def test_arabic_username_is_hashed(self, monkeypatch):
+        """Test that Arabic usernames are hashed."""
+        if IS_WINDOWS:
+            monkeypatch.setenv("USERNAME", "المستخدم")
+        else:
+            monkeypatch.setenv("USER", "المستخدم")
+        result = _get_safe_username()
+        assert len(result) == 12
+        assert all(c in "0123456789abcdef" for c in result)
 
 
 class TestGetLegacySocketPath:
