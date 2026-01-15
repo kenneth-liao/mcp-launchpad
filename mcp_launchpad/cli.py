@@ -17,6 +17,7 @@ from .config import Config, load_config
 from .connection import ConnectionManager, ToolInfo
 from .output import OutputHandler
 from .search import SearchMethod, ToolSearcher
+from .oauth import OAuthFlowError, get_oauth_manager
 from .session import SessionClient
 from .state import ServerState
 from .suggestions import (
@@ -649,6 +650,313 @@ def session_stop(ctx: click.Context) -> None:
                     "The daemon may have crashed. Socket and PID files will be cleaned up on next run."
                 ),
             )
+
+
+# =============================================================================
+# OAuth Authentication Commands
+# =============================================================================
+
+
+@main.group()
+@click.pass_context
+def auth(ctx: click.Context) -> None:
+    """Manage OAuth authentication for MCP servers.
+
+    OAuth authentication allows mcpl to connect to MCP servers that require
+    authorization, such as Notion, Figma, and other remote services.
+    """
+    pass
+
+
+@auth.command("login")
+@click.argument("server")
+@click.option("--scope", multiple=True, help="Additional scopes to request")
+@click.option("--force", is_flag=True, help="Force re-authentication even if already logged in")
+@click.option("--client-id", help="Use a specific OAuth client ID")
+@click.option("--client-secret", help="Use a specific OAuth client secret")
+@click.option("--timeout", default=120, help="Timeout for browser callback (seconds)")
+@click.pass_context
+def auth_login(
+    ctx: click.Context,
+    server: str,
+    scope: tuple[str, ...],
+    force: bool,
+    client_id: str | None,
+    client_secret: str | None,
+    timeout: int,
+) -> None:
+    """Authenticate with an OAuth-protected MCP server.
+
+    Opens a browser for authorization and stores tokens securely.
+    Tokens are encrypted and stored in ~/.cache/mcp-launchpad/oauth/
+
+    Example:
+        mcpl auth login notion
+        mcpl auth login figma --scope "read write"
+        mcpl auth login custom --client-id my-client-id
+    """
+    output: OutputHandler = ctx.obj["output"]
+    config = get_config(ctx)
+
+    # Validate server exists
+    if server not in config.servers:
+        available = ", ".join(sorted(config.servers.keys()))
+        output.error(
+            ValueError(f"Server '{server}' not found"),
+            help_text=f"Available servers: {available}",
+        )
+        return
+
+    server_config = config.servers[server]
+
+    # Check if it's an HTTP server
+    if not server_config.is_http():
+        output.error(
+            ValueError(f"Server '{server}' is a stdio server, not HTTP"),
+            help_text="OAuth authentication is only supported for HTTP servers.",
+        )
+        return
+
+    url = server_config.get_resolved_url()
+    oauth_manager = get_oauth_manager()
+
+    # Check if already authenticated (unless --force)
+    if not force and oauth_manager.has_valid_token(url):
+        if ctx.obj["json_mode"]:
+            output.success({"server": server, "status": "already_authenticated"})
+        else:
+            click.secho(f"Already authenticated with '{server}'.", fg="green")
+            click.echo("Use --force to re-authenticate.")
+        return
+
+    # Get client credentials from config or command line
+    config_client_id = client_id or server_config.get_resolved_oauth_client_id()
+    config_client_secret = client_secret or server_config.get_resolved_oauth_client_secret()
+
+    # Status callback for CLI feedback
+    def on_status(message: str) -> None:
+        if not ctx.obj["json_mode"]:
+            click.echo(message)
+
+    # Prompt callback for manual client registration
+    def prompt_for_credentials() -> tuple[str, str | None]:
+        click.echo()
+        click.secho(
+            "Dynamic Client Registration is not available for this server.",
+            fg="yellow",
+        )
+        click.echo("You'll need to register mcpl manually with the authorization server.")
+        click.echo()
+        entered_client_id = click.prompt("Enter client_id")
+        entered_client_secret = click.prompt(
+            "Enter client_secret (leave blank for public client)",
+            default="",
+            show_default=False,
+        )
+        return entered_client_id, entered_client_secret or None
+
+    # Run OAuth flow
+    try:
+        scopes = list(scope) if scope else server_config.oauth_scopes or None
+
+        token = asyncio.run(
+            oauth_manager.authenticate(
+                server_url=url,
+                client_id=config_client_id,
+                client_secret=config_client_secret,
+                scopes=scopes,
+                callback_timeout=timeout,
+                on_status=on_status,
+                prompt_for_credentials=prompt_for_credentials,
+            )
+        )
+
+        if ctx.obj["json_mode"]:
+            output.success(
+                {
+                    "server": server,
+                    "status": "authenticated",
+                    "expires_at": token.expires_at.isoformat() if token.expires_at else None,
+                    "scope": token.scope,
+                }
+            )
+        else:
+            click.echo()
+            click.secho(f"Successfully authenticated with '{server}'!", fg="green")
+            click.echo("Tokens stored securely in ~/.cache/mcp-launchpad/oauth/")
+
+            # Restart daemon to use new token
+            click.echo()
+            click.echo("Restarting session daemon to use new credentials...")
+            session_client = SessionClient(config)
+            try:
+                asyncio.run(session_client.shutdown())
+            except Exception:
+                pass  # Daemon may not be running
+
+    except OAuthFlowError as e:
+        output.error(
+            e,
+            help_text=(
+                "OAuth authentication failed.\n\n"
+                "Common issues:\n"
+                "- The authorization server may not support Dynamic Client Registration\n"
+                "- You may need to configure oauth_client_id in your config\n"
+                "- The server may have denied the authorization request"
+            ),
+        )
+
+
+@auth.command("logout")
+@click.argument("server")
+@click.pass_context
+def auth_logout(ctx: click.Context, server: str) -> None:
+    """Remove stored authentication for a server.
+
+    This deletes the stored OAuth tokens for the specified server.
+
+    Example:
+        mcpl auth logout notion
+    """
+    output: OutputHandler = ctx.obj["output"]
+    config = get_config(ctx)
+
+    # Validate server exists
+    if server not in config.servers:
+        available = ", ".join(sorted(config.servers.keys()))
+        output.error(
+            ValueError(f"Server '{server}' not found"),
+            help_text=f"Available servers: {available}",
+        )
+        return
+
+    server_config = config.servers[server]
+    if not server_config.is_http():
+        output.error(
+            ValueError(f"Server '{server}' is a stdio server"),
+            help_text="OAuth authentication is only relevant for HTTP servers.",
+        )
+        return
+
+    url = server_config.get_resolved_url()
+    oauth_manager = get_oauth_manager()
+
+    deleted = oauth_manager.logout(url)
+
+    if ctx.obj["json_mode"]:
+        output.success({"server": server, "logged_out": deleted})
+    else:
+        if deleted:
+            click.secho(f"Logged out from '{server}'.", fg="green")
+            click.echo("Stored OAuth tokens have been deleted.")
+        else:
+            click.echo(f"No stored authentication found for '{server}'.")
+
+
+@auth.command("status")
+@click.argument("server", required=False)
+@click.pass_context
+def auth_status(ctx: click.Context, server: str | None) -> None:
+    """Show authentication status for servers.
+
+    Without SERVER argument, shows status for all HTTP servers.
+    With SERVER argument, shows detailed status for that server.
+
+    Example:
+        mcpl auth status
+        mcpl auth status notion
+    """
+    output: OutputHandler = ctx.obj["output"]
+    config = get_config(ctx)
+    oauth_manager = get_oauth_manager()
+
+    if server:
+        # Show status for specific server
+        if server not in config.servers:
+            available = ", ".join(sorted(config.servers.keys()))
+            output.error(
+                ValueError(f"Server '{server}' not found"),
+                help_text=f"Available servers: {available}",
+            )
+            return
+
+        server_config = config.servers[server]
+        if not server_config.is_http():
+            output.error(
+                ValueError(f"Server '{server}' is a stdio server"),
+                help_text="OAuth authentication is only relevant for HTTP servers.",
+            )
+            return
+
+        url = server_config.get_resolved_url()
+        status = oauth_manager.get_auth_status(url, server)
+
+        if ctx.obj["json_mode"]:
+            output.success(status.to_dict())
+        else:
+            click.secho(f"\nOAuth Status for [{server}]:\n", bold=True)
+            if status.authenticated:
+                if status.expired:
+                    click.secho("  Status: ", nl=False)
+                    click.secho("expired", fg="yellow")
+                else:
+                    click.secho("  Status: ", nl=False)
+                    click.secho("authenticated", fg="green")
+
+                if status.expires_at:
+                    click.echo(f"  Expires: {status.expires_at}")
+                if status.scope:
+                    click.echo(f"  Scopes: {status.scope}")
+                click.echo(f"  Has refresh token: {status.has_refresh_token}")
+
+                if status.expired:
+                    click.echo()
+                    click.secho(f"  Run: mcpl auth login {server}", fg="cyan")
+            else:
+                click.secho("  Status: ", nl=False)
+                click.secho("not authenticated", fg="red")
+                click.echo()
+                click.secho(f"  Run: mcpl auth login {server}", fg="cyan")
+    else:
+        # Show status for all HTTP servers
+        statuses = []
+        for name, server_config in config.servers.items():
+            if server_config.is_http():
+                url = server_config.get_resolved_url()
+                status = oauth_manager.get_auth_status(url, name)
+                statuses.append(status)
+
+        if ctx.obj["json_mode"]:
+            output.success({"servers": [s.to_dict() for s in statuses]})
+        else:
+            if not statuses:
+                click.echo("No HTTP servers configured.")
+                return
+
+            click.secho("\nOAuth Authentication Status:\n", bold=True)
+            for status in statuses:
+                click.secho(f"  [{status.server_name}] ", fg="cyan", nl=False)
+
+                if status.authenticated:
+                    if status.expired:
+                        click.secho("expired", fg="yellow")
+                        if status.expires_at:
+                            click.echo(f"    Expired: {status.expires_at}")
+                    else:
+                        click.secho("authenticated", fg="green")
+                        if status.expires_at:
+                            click.echo(f"    Expires: {status.expires_at}")
+                        if status.scope:
+                            click.echo(f"    Scopes: {status.scope}")
+                else:
+                    click.secho("not authenticated", fg="red")
+
+            click.echo()
+            # Show hint for unauthenticated servers
+            unauthenticated = [s for s in statuses if not s.authenticated]
+            if unauthenticated:
+                click.echo("To authenticate: ", nl=False)
+                click.secho("mcpl auth login <server>", fg="cyan")
 
 
 @main.command()
