@@ -48,6 +48,10 @@ class ServerConfig:
     server_type: str = "stdio"  # "stdio" or "http"
     url: str = ""
     headers: dict[str, str] = field(default_factory=dict)
+    # OAuth fields (for HTTP servers)
+    oauth_client_id: str | None = None
+    oauth_client_secret: str | None = None
+    oauth_scopes: list[str] = field(default_factory=list)
 
     def is_http(self) -> bool:
         """Check if this is an HTTP-based server."""
@@ -68,6 +72,18 @@ class ServerConfig:
     def get_resolved_headers(self) -> dict[str, str]:
         """Resolve environment variables in headers."""
         return {key: _resolve_env_vars(value) for key, value in self.headers.items()}
+
+    def get_resolved_oauth_client_id(self) -> str | None:
+        """Resolve environment variables in OAuth client ID."""
+        if self.oauth_client_id is None:
+            return None
+        return _resolve_env_vars(self.oauth_client_id)
+
+    def get_resolved_oauth_client_secret(self) -> str | None:
+        """Resolve environment variables in OAuth client secret."""
+        if self.oauth_client_secret is None:
+            return None
+        return _resolve_env_vars(self.oauth_client_secret)
 
 
 @dataclass
@@ -183,7 +199,7 @@ def parse_server_config(name: str, data: dict[str, Any]) -> ServerConfig:
 
     Supports both stdio and HTTP transport types:
     - stdio (default): Uses command, args, env
-    - http: Uses url, headers
+    - http: Uses url, headers, and optional OAuth fields
     """
     server_type = data.get("type", "stdio")
 
@@ -197,6 +213,10 @@ def parse_server_config(name: str, data: dict[str, Any]) -> ServerConfig:
         server_type=server_type,
         url=data.get("url", ""),
         headers=data.get("headers", {}),
+        # OAuth fields
+        oauth_client_id=data.get("oauth_client_id"),
+        oauth_client_secret=data.get("oauth_client_secret"),
+        oauth_scopes=data.get("oauth_scopes", []),
     )
 
 
