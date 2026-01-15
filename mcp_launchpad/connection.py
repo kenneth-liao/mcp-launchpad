@@ -22,6 +22,31 @@ from .config import Config, ServerConfig
 # Logger for connection management
 logger = logging.getLogger("mcpl.connection")
 
+
+class OAuthRequiredError(Exception):
+    """Raised when an MCP server requires OAuth authentication."""
+
+    def __init__(
+        self, server_name: str, url: str, www_authenticate: str | None = None
+    ):
+        self.server_name = server_name
+        self.url = url
+        self.www_authenticate = www_authenticate
+
+        message = (
+            f"Server '{server_name}' requires OAuth authentication.\n\n"
+            f"URL: {url}\n\n"
+            "mcpl does not currently support OAuth authentication flows.\n\n"
+            "Options:\n"
+            "1. Use Claude Code or Claude Desktop to authenticate first\n"
+            "   (Note: OAuth tokens are tied to specific clients per MCP spec)\n"
+            "2. If the server supports static API keys, configure headers:\n"
+            '   Add to config: "headers": {"Authorization": "Bearer ${TOKEN}"}\n'
+            "3. Wait for OAuth support in a future mcpl release\n\n"
+            "See: https://github.com/kenneth-liao/mcp-launchpad/issues/7"
+        )
+        super().__init__(message)
+
 # Connection timeout in seconds (configurable via MCPL_CONNECTION_TIMEOUT env var)
 CONNECTION_TIMEOUT = int(os.environ.get("MCPL_CONNECTION_TIMEOUT", "45"))
 
@@ -181,6 +206,31 @@ class ConnectionManager:
 
         try:
             async with asyncio.timeout(CONNECTION_TIMEOUT):
+                # Preflight check: detect OAuth-requiring servers before full connection
+                # MCP servers requiring OAuth return 401 with WWW-Authenticate header
+                try:
+                    preflight_response = await http_client.post(
+                        url,
+                        json={
+                            "jsonrpc": "2.0",
+                            "method": "initialize",
+                            "id": 0,
+                            "params": {
+                                "protocolVersion": "2024-11-05",
+                                "capabilities": {},
+                                "clientInfo": {"name": "mcpl", "version": "0.1.0"},
+                            },
+                        },
+                        headers={"Content-Type": "application/json"},
+                    )
+                    if preflight_response.status_code == 401:
+                        www_auth = preflight_response.headers.get("WWW-Authenticate")
+                        raise OAuthRequiredError(server_name, url, www_auth)
+                except httpx.RequestError:
+                    # If preflight fails for network reasons, proceed and let
+                    # streamable_http_client handle the error
+                    pass
+
                 # terminate_on_close=False: Skip DELETE request for session cleanup
                 # Many servers (like Supabase) don't implement this endpoint and return 404
                 # HTTP connections are stateless anyway, so cleanup happens naturally
@@ -192,6 +242,9 @@ class ConnectionManager:
                         logger.debug(f"HTTP connection to '{server_name}' initialized")
                         yield session
                         logger.debug(f"HTTP connection to '{server_name}' closing")
+        except OAuthRequiredError:
+            # Re-raise OAuth errors without wrapping
+            raise
         except TimeoutError as e:
             raise TimeoutError(
                 f"Connection to '{server_name}' timed out after {CONNECTION_TIMEOUT}s.\n\n"

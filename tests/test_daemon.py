@@ -4,9 +4,11 @@ import os
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from mcp_launchpad.config import Config, ServerConfig
+from mcp_launchpad.connection import OAuthRequiredError
 from mcp_launchpad.daemon import Daemon, DaemonState, ServerState
 from mcp_launchpad.ipc import IPCMessage
 
@@ -473,3 +475,154 @@ class TestDaemonReconnectionBehavior:
                     await daemon._ensure_server_connected("test-server")
 
                 assert "timed out" in str(excinfo.value).lower()
+
+
+class TestDaemonOAuthHandling:
+    """Tests for OAuth authentication handling in daemon.
+
+    These tests verify that the daemon correctly detects and handles
+    OAuth-requiring MCP servers (GitHub Issue #7).
+    """
+
+    @pytest.fixture
+    def http_server_config(self):
+        """Create a config with an HTTP server requiring OAuth."""
+        return Config(
+            servers={
+                "oauth-server": ServerConfig(
+                    name="oauth-server",
+                    server_type="http",
+                    url="https://api.example.com/mcp",
+                    headers={},
+                ),
+            },
+            config_path=Path("/tmp/test-config.json"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_oauth_required_no_retry(self, http_server_config):
+        """Test that OAuth-requiring servers don't trigger retry.
+
+        When a server returns 401 (OAuth required), retrying won't help
+        because the user needs to authenticate. The daemon should not
+        waste time retrying.
+        """
+        with patch("mcp_launchpad.daemon.get_parent_pid", return_value=12345):
+            with patch("mcp_launchpad.daemon.MAX_RECONNECT_ATTEMPTS", 3):
+                daemon = Daemon(http_server_config)
+                daemon.state.running = True
+
+                # Mock httpx.AsyncClient.post to return 401
+                mock_response = MagicMock()
+                mock_response.status_code = 401
+                mock_response.headers = {
+                    "WWW-Authenticate": 'Bearer realm="api"'
+                }
+
+                with patch.object(
+                    httpx.AsyncClient, "post", new_callable=AsyncMock
+                ) as mock_post:
+                    mock_post.return_value = mock_response
+
+                    await daemon._connect_server("oauth-server")
+
+                # Server should have OAuth error state
+                server_state = daemon.state.servers.get("oauth-server")
+                assert server_state is not None
+                assert server_state.connected is False
+                assert "OAuth" in server_state.error
+                assert "oauth-server" in server_state.error
+
+    @pytest.mark.asyncio
+    async def test_oauth_error_message_is_helpful(self, http_server_config):
+        """Test that OAuth error message provides helpful guidance.
+
+        Users should understand:
+        1. What went wrong (OAuth required)
+        2. Why mcpl can't handle it (tokens are client-specific)
+        3. What they can do (use Claude, configure headers, wait for support)
+        """
+        with patch("mcp_launchpad.daemon.get_parent_pid", return_value=12345):
+            daemon = Daemon(http_server_config)
+            daemon.state.running = True
+
+            mock_response = MagicMock()
+            mock_response.status_code = 401
+            mock_response.headers = {"WWW-Authenticate": "Bearer"}
+
+            with patch.object(
+                httpx.AsyncClient, "post", new_callable=AsyncMock
+            ) as mock_post:
+                mock_post.return_value = mock_response
+
+                await daemon._connect_server("oauth-server")
+
+            server_state = daemon.state.servers.get("oauth-server")
+            error_msg = server_state.error
+
+            # Should mention OAuth
+            assert "OAuth" in error_msg
+
+            # Should provide alternatives
+            assert "Claude" in error_msg  # Suggest using Claude Code
+            assert "headers" in error_msg  # Suggest static auth if available
+
+    @pytest.mark.asyncio
+    async def test_non_401_http_error_still_retries(self, http_server_config):
+        """Test that non-OAuth HTTP errors still trigger retry.
+
+        A 500 error (server error) or 503 (service unavailable) might be
+        temporary, so the daemon should retry those.
+        """
+        with patch("mcp_launchpad.daemon.get_parent_pid", return_value=12345):
+            with patch("mcp_launchpad.daemon.MAX_RECONNECT_ATTEMPTS", 2):
+                with patch("mcp_launchpad.daemon.RECONNECT_DELAY", 0.01):
+                    daemon = Daemon(http_server_config)
+                    daemon.state.running = True
+
+                    attempt_count = 0
+
+                    async def mock_post(*args, **kwargs):
+                        nonlocal attempt_count
+                        attempt_count += 1
+                        # Return 200 on preflight, then fail on actual connection
+                        mock_response = MagicMock()
+                        mock_response.status_code = 200
+                        return mock_response
+
+                    with patch.object(
+                        httpx.AsyncClient, "post", side_effect=mock_post
+                    ):
+                        with patch(
+                            "mcp_launchpad.daemon.streamable_http_client",
+                            side_effect=httpx.ConnectError("Connection refused"),
+                        ):
+                            await daemon._connect_server("oauth-server")
+
+                    # Should have retried (more than 1 attempt)
+                    # Note: preflight check happens each attempt
+                    assert attempt_count >= 2
+
+    @pytest.mark.asyncio
+    async def test_oauth_server_status_shows_oauth_error(self, http_server_config):
+        """Test that daemon status correctly reports OAuth errors."""
+        with patch("mcp_launchpad.daemon.get_parent_pid", return_value=12345):
+            daemon = Daemon(http_server_config)
+            daemon.state.running = True
+
+            mock_response = MagicMock()
+            mock_response.status_code = 401
+            mock_response.headers = {"WWW-Authenticate": "Bearer"}
+
+            with patch.object(
+                httpx.AsyncClient, "post", new_callable=AsyncMock
+            ) as mock_post:
+                mock_post.return_value = mock_response
+
+                await daemon._connect_server("oauth-server")
+
+            # Check status includes OAuth error
+            status = daemon._get_status()
+            assert "oauth-server" in status["servers"]
+            assert status["servers"]["oauth-server"]["connected"] is False
+            assert "OAuth" in status["servers"]["oauth-server"]["error"]

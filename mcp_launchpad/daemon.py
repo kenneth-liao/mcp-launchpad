@@ -18,6 +18,7 @@ from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
 from .config import Config, ServerConfig, load_config
+from .connection import OAuthRequiredError
 from .ipc import IPCMessage, create_ipc_server
 from .platform import (
     IS_WINDOWS,
@@ -201,6 +202,31 @@ class Daemon:
 
             try:
                 async with asyncio.timeout(CONNECTION_TIMEOUT):
+                    # Preflight check: detect OAuth-requiring servers
+                    # MCP servers requiring OAuth return 401 with WWW-Authenticate
+                    try:
+                        preflight_response = await http_client.post(
+                            url,
+                            json={
+                                "jsonrpc": "2.0",
+                                "method": "initialize",
+                                "id": 0,
+                                "params": {
+                                    "protocolVersion": "2024-11-05",
+                                    "capabilities": {},
+                                    "clientInfo": {"name": "mcpl", "version": "0.1.0"},
+                                },
+                            },
+                            headers={"Content-Type": "application/json"},
+                        )
+                        if preflight_response.status_code == 401:
+                            www_auth = preflight_response.headers.get("WWW-Authenticate")
+                            raise OAuthRequiredError(server_name, url, www_auth)
+                    except httpx.RequestError:
+                        # If preflight fails for network reasons, proceed and let
+                        # streamable_http_client handle the error
+                        pass
+
                     async with streamable_http_client(
                         url, http_client=http_client, terminate_on_close=False
                     ) as (read, write, _get_session_id):
@@ -219,6 +245,11 @@ class Daemon:
                             # Clean exit
                             return
 
+            except OAuthRequiredError as e:
+                # OAuth errors should not be retried - user action required
+                server_state.error = str(e)
+                logger.warning(f"Server {server_name}: OAuth authentication required")
+                return
             except TimeoutError:
                 server_state.error = (
                     f"Connection timed out after {CONNECTION_TIMEOUT}s.\n"

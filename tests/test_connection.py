@@ -2,12 +2,13 @@
 
 import json
 import os
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from mcp_launchpad.config import Config, ServerConfig
-from mcp_launchpad.connection import ConnectionManager, ToolInfo
+from mcp_launchpad.connection import ConnectionManager, OAuthRequiredError, ToolInfo
 
 
 class TestToolInfo:
@@ -295,3 +296,126 @@ class TestConnectionManagerCallTool:
             await manager.call_tool("nonexistent", "some_tool", {})
 
         assert "Server 'nonexistent' not found" in str(excinfo.value)
+
+
+class TestOAuthRequiredError:
+    """Tests for OAuthRequiredError exception."""
+
+    def test_error_message_includes_server_name(self):
+        """Test that error message includes the server name."""
+        error = OAuthRequiredError("notion", "https://api.notion.com/mcp")
+        assert "notion" in str(error)
+        assert "requires OAuth authentication" in str(error)
+
+    def test_error_message_includes_url(self):
+        """Test that error message includes the URL."""
+        error = OAuthRequiredError("notion", "https://api.notion.com/mcp")
+        assert "https://api.notion.com/mcp" in str(error)
+
+    def test_error_message_includes_options(self):
+        """Test that error message includes helpful options."""
+        error = OAuthRequiredError("notion", "https://api.notion.com/mcp")
+        message = str(error)
+        assert "Claude Code" in message or "Claude Desktop" in message
+        assert "headers" in message
+        assert "Bearer" in message
+
+    def test_error_stores_attributes(self):
+        """Test that error stores server_name, url, and www_authenticate."""
+        www_auth = 'Bearer realm="api", resource="https://api.notion.com"'
+        error = OAuthRequiredError("notion", "https://api.notion.com/mcp", www_auth)
+        assert error.server_name == "notion"
+        assert error.url == "https://api.notion.com/mcp"
+        assert error.www_authenticate == www_auth
+
+    def test_error_message_includes_github_issue_link(self):
+        """Test that error message includes the GitHub issue link for tracking."""
+        error = OAuthRequiredError("notion", "https://api.notion.com/mcp")
+        assert "github.com" in str(error)
+        assert "issues/7" in str(error)
+
+
+class TestConnectionManagerOAuth:
+    """Tests for OAuth handling in ConnectionManager."""
+
+    @pytest.fixture
+    def http_server_config(self) -> Config:
+        """Create a config with an HTTP server."""
+        return Config(
+            servers={
+                "oauth-server": ServerConfig(
+                    name="oauth-server",
+                    server_type="http",
+                    url="https://api.example.com/mcp",
+                    headers={},
+                ),
+            },
+            config_path=None,
+            env_path=None,
+        )
+
+    async def test_connect_detects_401_oauth_required(
+        self, http_server_config: Config
+    ):
+        """Test that 401 responses are detected as OAuth required."""
+        manager = ConnectionManager(http_server_config)
+
+        # Mock httpx.AsyncClient.post to return 401
+        mock_response = MagicMock()
+        mock_response.status_code = 401
+        mock_response.headers = {"WWW-Authenticate": 'Bearer realm="api"'}
+
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = mock_response
+
+            with pytest.raises(OAuthRequiredError) as excinfo:
+                async with manager.connect("oauth-server"):
+                    pass
+
+            error = excinfo.value
+            assert error.server_name == "oauth-server"
+            assert "https://api.example.com/mcp" in error.url
+            assert error.www_authenticate == 'Bearer realm="api"'
+
+    async def test_connect_non_401_proceeds_normally(
+        self, http_server_config: Config
+    ):
+        """Test that non-401 responses proceed to normal connection."""
+        manager = ConnectionManager(http_server_config)
+
+        # Mock httpx.AsyncClient.post to return 200
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+
+        # The connection will still fail because we're not fully mocking the MCP
+        # session, but it should get past the OAuth check
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = mock_response
+
+            # This will fail at the streamable_http_client stage, not OAuth check
+            with pytest.raises(Exception) as excinfo:
+                async with manager.connect("oauth-server"):
+                    pass
+
+            # Should NOT be an OAuthRequiredError
+            assert not isinstance(excinfo.value, OAuthRequiredError)
+
+    async def test_connect_network_error_proceeds_to_normal_flow(
+        self, http_server_config: Config
+    ):
+        """Test that network errors in preflight proceed to normal connection."""
+        manager = ConnectionManager(http_server_config)
+
+        # Mock httpx.AsyncClient.post to raise network error
+        with patch(
+            "httpx.AsyncClient.post",
+            new_callable=AsyncMock,
+            side_effect=httpx.RequestError("Network error"),
+        ):
+            # This will fail at the streamable_http_client stage, not preflight
+            with pytest.raises(Exception) as excinfo:
+                async with manager.connect("oauth-server"):
+                    pass
+
+            # Should NOT be an OAuthRequiredError - network errors are passed through
+            assert not isinstance(excinfo.value, OAuthRequiredError)
