@@ -423,3 +423,157 @@ class TestAuthHelp:
         assert "--scope" in result.output
         assert "--force" in result.output
         assert "--client-id" in result.output
+
+
+class TestInteractiveOAuthPrompt:
+    """Tests for interactive OAuth prompt during list --refresh."""
+
+    def test_oauth_prompt_shown_on_auth_required(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """Test that OAuth prompt is shown when server requires authentication."""
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({
+            "mcpServers": {
+                "notion": {"type": "http", "url": "https://mcp.notion.so/v1"}
+            }
+        }))
+
+        with patch("mcp_launchpad.cli.ToolCache") as mock_cache_class:
+            mock_cache = MagicMock()
+            mock_cache_class.return_value = mock_cache
+
+            # Simulate OAuth error during refresh
+            async def mock_refresh(force=False, on_progress=None, servers=None):
+                if on_progress:
+                    on_progress(
+                        "notion", "error", None,
+                        "Server 'notion' requires OAuth authentication"
+                    )
+                return []
+
+            mock_cache.refresh = mock_refresh
+            mock_cache.get_tools.return_value = []
+
+            with patch("mcp_launchpad.cli.ServerState") as mock_state_class:
+                mock_state = MagicMock()
+                mock_state.get_enabled_servers.return_value = {"notion": True}
+                mock_state.get_disabled_servers.return_value = []
+                mock_state_class.return_value = mock_state
+
+                with patch("mcp_launchpad.cli.get_oauth_manager") as mock_get_manager:
+                    mock_manager = MagicMock()
+                    mock_manager.has_valid_token.return_value = False
+                    mock_get_manager.return_value = mock_manager
+
+                    # Decline the prompt
+                    result = runner.invoke(
+                        main,
+                        ["--config", str(config_file), "list", "--refresh"],
+                        input="n\n",  # Decline OAuth
+                    )
+
+                    assert result.exit_code == 0
+                    assert "AUTH REQUIRED" in result.output
+                    assert "Would you like to authenticate" in result.output
+
+    def test_oauth_prompt_accepted_triggers_flow(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """Test that accepting OAuth prompt triggers authentication flow."""
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({
+            "mcpServers": {
+                "notion": {"type": "http", "url": "https://mcp.notion.so/v1"}
+            }
+        }))
+
+        with patch("mcp_launchpad.cli.ToolCache") as mock_cache_class:
+            mock_cache = MagicMock()
+            mock_cache_class.return_value = mock_cache
+
+            call_count = [0]
+
+            async def mock_refresh(force=False, on_progress=None, servers=None):
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    # First call: OAuth error
+                    if on_progress:
+                        on_progress(
+                            "notion", "error", None,
+                            "Server 'notion' requires OAuth authentication"
+                        )
+                else:
+                    # Second call (retry): Success
+                    if on_progress:
+                        on_progress("notion", "done", 5, None)
+                return []
+
+            mock_cache.refresh = mock_refresh
+            mock_cache.get_tools.return_value = []
+
+            with patch("mcp_launchpad.cli.ServerState") as mock_state_class:
+                mock_state = MagicMock()
+                mock_state.get_enabled_servers.return_value = {"notion": True}
+                mock_state.get_disabled_servers.return_value = []
+                mock_state_class.return_value = mock_state
+
+                with patch("mcp_launchpad.cli.get_oauth_manager") as mock_get_manager:
+                    mock_manager = MagicMock()
+                    mock_manager.has_valid_token.return_value = False
+                    mock_manager.authenticate = AsyncMock(return_value=MagicMock())
+                    mock_get_manager.return_value = mock_manager
+
+                    # Accept the prompt
+                    result = runner.invoke(
+                        main,
+                        ["--config", str(config_file), "list", "--refresh"],
+                        input="y\n",  # Accept OAuth
+                    )
+
+                    assert result.exit_code == 0
+                    assert "AUTH REQUIRED" in result.output
+                    # Verify authenticate was called
+                    mock_manager.authenticate.assert_called_once()
+
+    def test_oauth_prompt_skipped_in_json_mode(
+        self, runner: CliRunner, tmp_path: Path
+    ) -> None:
+        """Test that OAuth prompt is not shown in JSON mode."""
+        config_file = tmp_path / "config.json"
+        config_file.write_text(json.dumps({
+            "mcpServers": {
+                "notion": {"type": "http", "url": "https://mcp.notion.so/v1"}
+            }
+        }))
+
+        with patch("mcp_launchpad.cli.ToolCache") as mock_cache_class:
+            mock_cache = MagicMock()
+            mock_cache_class.return_value = mock_cache
+
+            async def mock_refresh(force=False, on_progress=None, servers=None):
+                if on_progress:
+                    on_progress(
+                        "notion", "error", None,
+                        "Server 'notion' requires OAuth authentication"
+                    )
+                return []
+
+            mock_cache.refresh = mock_refresh
+            mock_cache.get_tools.return_value = []
+
+            with patch("mcp_launchpad.cli.ServerState") as mock_state_class:
+                mock_state = MagicMock()
+                mock_state.get_enabled_servers.return_value = {"notion": True}
+                mock_state.get_disabled_servers.return_value = []
+                mock_state_class.return_value = mock_state
+
+                # JSON mode - should not prompt
+                result = runner.invoke(
+                    main,
+                    ["--config", str(config_file), "--json", "list", "--refresh"],
+                )
+
+                assert result.exit_code == 0
+                # Should not contain interactive prompt text
+                assert "Would you like to authenticate" not in result.output
