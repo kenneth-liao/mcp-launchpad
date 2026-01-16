@@ -918,7 +918,11 @@ def auth_logout(ctx: click.Context, server: str | None, logout_all: bool) -> Non
     url = server_config.get_resolved_url()
 
     try:
-        deleted = oauth_manager.logout(url)
+        # Use async logout for server-side token revocation (RFC 7009)
+        if not ctx.obj["json_mode"]:
+            click.echo(f"Logging out from '{server}'...")
+
+        deleted = asyncio.run(oauth_manager.logout_async(url))
     except TokenDecryptionError:
         # Can't read tokens, but we can still try to clear them
         click.secho(
@@ -933,7 +937,7 @@ def auth_logout(ctx: click.Context, server: str | None, logout_all: bool) -> Non
     else:
         if deleted:
             click.secho(f"Logged out from '{server}'.", fg="green")
-            click.echo("Stored OAuth tokens have been deleted.")
+            click.echo("Tokens revoked and deleted locally.")
         else:
             click.echo(f"No stored authentication found for '{server}'.")
 

@@ -4,6 +4,7 @@ This module provides secure storage for OAuth tokens using:
 - Fernet symmetric encryption (AES-128-CBC + HMAC)
 - OS keyring for encryption key storage (Keychain, libsecret, DPAPI)
 - File permissions for defense in depth
+- File locking to prevent race conditions
 """
 
 import base64
@@ -12,8 +13,10 @@ import json
 import logging
 import os
 import stat
+import sys
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Generator
 
 import keyring
 from cryptography.fernet import Fernet, InvalidToken
@@ -21,6 +24,59 @@ from cryptography.fernet import Fernet, InvalidToken
 from .tokens import ClientCredentials, TokenSet
 
 logger = logging.getLogger(__name__)
+
+# File locking support
+if sys.platform != "win32":
+    import fcntl
+
+    @contextmanager
+    def _file_lock(filepath: Path, exclusive: bool = True) -> Generator[None, None, None]:
+        """Acquire a file lock (Unix implementation using fcntl).
+
+        Args:
+            filepath: Path to the file to lock
+            exclusive: If True, acquire exclusive lock; otherwise shared lock
+        """
+        lock_path = filepath.with_suffix(filepath.suffix + ".lock")
+        lock_path.touch(exist_ok=True)
+
+        with open(lock_path, "r") as lock_file:
+            try:
+                if exclusive:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                else:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_SH)
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+else:
+    # Windows: use msvcrt for file locking
+    import msvcrt
+
+    @contextmanager
+    def _file_lock(filepath: Path, exclusive: bool = True) -> Generator[None, None, None]:
+        """Acquire a file lock (Windows implementation using msvcrt).
+
+        Args:
+            filepath: Path to the file to lock
+            exclusive: If True, acquire exclusive lock; otherwise shared lock
+        """
+        lock_path = filepath.with_suffix(filepath.suffix + ".lock")
+        lock_path.touch(exist_ok=True)
+
+        with open(lock_path, "r+") as lock_file:
+            try:
+                if exclusive:
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                else:
+                    # Windows doesn't have true shared locks with msvcrt
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                yield
+            finally:
+                try:
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
 
 
 # Keyring service name for mcpl
@@ -176,7 +232,9 @@ class TokenStore:
             ) from e
 
     def _read_encrypted_file(self, filename: str) -> dict[str, Any]:
-        """Read and decrypt a JSON file.
+        """Read and decrypt a JSON file with file locking.
+
+        Uses shared (read) lock to allow concurrent reads but block writes.
 
         Args:
             filename: Name of file in store directory
@@ -193,10 +251,11 @@ class TokenStore:
             return {}
 
         try:
-            encrypted_data = filepath.read_text()
-            decrypted_json = self._decrypt(encrypted_data)
-            result: dict[str, Any] = json.loads(decrypted_json)
-            return result
+            with _file_lock(filepath, exclusive=False):  # Shared lock for reading
+                encrypted_data = filepath.read_text()
+                decrypted_json = self._decrypt(encrypted_data)
+                result: dict[str, Any] = json.loads(decrypted_json)
+                return result
         except TokenStoreError as e:
             # Decryption failed - raise so caller can decide how to handle
             raise TokenDecryptionError(
@@ -211,7 +270,9 @@ class TokenStore:
             ) from e
 
     def _write_encrypted_file(self, filename: str, data: dict[str, Any]) -> None:
-        """Encrypt and write a JSON file with secure permissions.
+        """Encrypt and write a JSON file with secure permissions and file locking.
+
+        Uses exclusive (write) lock to prevent concurrent reads/writes.
 
         Args:
             filename: Name of file in store directory
@@ -222,12 +283,13 @@ class TokenStore:
         json_data = json.dumps(data, indent=2)
         encrypted_data = self._encrypt(json_data)
 
-        # Write with secure permissions
-        filepath.write_text(encrypted_data)
-        try:
-            filepath.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 0600
-        except OSError as e:
-            logger.warning(f"Could not set file permissions: {e}")
+        # Write with exclusive lock and secure permissions
+        with _file_lock(filepath, exclusive=True):  # Exclusive lock for writing
+            filepath.write_text(encrypted_data)
+            try:
+                filepath.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 0600
+            except OSError as e:
+                logger.warning(f"Could not set file permissions: {e}")
 
     def _normalize_resource(self, resource: str) -> str:
         """Normalize a resource URL for consistent key lookup.

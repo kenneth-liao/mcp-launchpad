@@ -309,6 +309,76 @@ async def refresh_token(
             await http.aclose()
 
 
+async def revoke_token(
+    auth_server_metadata: AuthServerMetadata,
+    client: ClientCredentials,
+    token: str,
+    token_type_hint: str = "access_token",
+    http_client: httpx.AsyncClient | None = None,
+) -> bool:
+    """Revoke an OAuth token per RFC 7009.
+
+    Token revocation invalidates a token on the server side, preventing
+    its future use even if it hasn't expired yet.
+
+    Args:
+        auth_server_metadata: Authorization server metadata
+        client: Client credentials
+        token: The token to revoke (access or refresh token)
+        token_type_hint: Hint about token type ("access_token" or "refresh_token")
+        http_client: Optional HTTP client
+
+    Returns:
+        True if revocation succeeded or server doesn't support revocation,
+        False if revocation failed
+
+    Note:
+        Per RFC 7009, the revocation endpoint returns 200 OK even if the
+        token was already invalid. Errors are only returned for malformed
+        requests or server errors.
+    """
+    if not auth_server_metadata.supports_revocation():
+        logger.debug("Server does not support token revocation")
+        return True  # Not an error - server just doesn't support it
+
+    http = http_client or httpx.AsyncClient(timeout=30.0)
+    should_close = http_client is None
+
+    try:
+        revocation_request: dict[str, str] = {
+            "token": token,
+            "token_type_hint": token_type_hint,
+            "client_id": client.client_id,
+        }
+
+        if client.is_confidential():
+            revocation_request["client_secret"] = client.client_secret  # type: ignore
+
+        response = await http.post(
+            auth_server_metadata.revocation_endpoint,  # type: ignore
+            data=revocation_request,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+
+        # RFC 7009: 200 OK means success (even if token was already invalid)
+        if response.status_code == 200:
+            logger.debug(f"Token revoked successfully ({token_type_hint})")
+            return True
+
+        # Log error but don't raise - revocation failure shouldn't block logout
+        logger.warning(
+            f"Token revocation returned HTTP {response.status_code}"
+        )
+        return False
+
+    except httpx.RequestError as e:
+        logger.warning(f"Network error during token revocation: {e}")
+        return False
+    finally:
+        if should_close:
+            await http.aclose()
+
+
 class OAuthFlow:
     """Orchestrates the complete OAuth authorization code flow.
 

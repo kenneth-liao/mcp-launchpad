@@ -15,6 +15,7 @@ from mcp_launchpad.oauth.flow import (
     exchange_code_for_tokens,
     refresh_token,
     register_client_dcr,
+    revoke_token,
 )
 from mcp_launchpad.oauth.store import TokenStore
 from mcp_launchpad.oauth.tokens import ClientCredentials
@@ -408,3 +409,147 @@ class TestHTTPSEnforcement:
 
         assert "HTTPS" in str(exc_info.value)
         assert "Registration endpoint" in str(exc_info.value)
+
+    def test_http_revocation_endpoint_rejected(self) -> None:
+        """Test that HTTP revocation endpoint is rejected."""
+        with pytest.raises(DiscoveryError) as exc_info:
+            AuthServerMetadata.from_dict({
+                "issuer": "https://auth.example.com",
+                "authorization_endpoint": "https://auth.example.com/authorize",
+                "token_endpoint": "https://auth.example.com/token",
+                "revocation_endpoint": "http://auth.example.com/revoke",  # HTTP!
+            })
+
+        assert "HTTPS" in str(exc_info.value)
+        assert "Revocation endpoint" in str(exc_info.value)
+
+
+class TestRevokeToken:
+    """Tests for token revocation (RFC 7009)."""
+
+    @pytest.mark.asyncio
+    async def test_successful_revocation(self) -> None:
+        """Test successful token revocation."""
+        metadata = AuthServerMetadata(
+            issuer="https://auth.example.com",
+            authorization_endpoint="https://auth.example.com/authorize",
+            token_endpoint="https://auth.example.com/token",
+            revocation_endpoint="https://auth.example.com/revoke",
+        )
+        client = ClientCredentials(client_id="test_client")
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+
+        mock_http = AsyncMock()
+        mock_http.post = AsyncMock(return_value=mock_response)
+        mock_http.aclose = AsyncMock()
+
+        result = await revoke_token(
+            auth_server_metadata=metadata,
+            client=client,
+            token="test_access_token",
+            token_type_hint="access_token",
+            http_client=mock_http,
+        )
+
+        assert result is True
+
+        # Verify correct request was made
+        call_args = mock_http.post.call_args
+        assert call_args.kwargs["data"]["token"] == "test_access_token"
+        assert call_args.kwargs["data"]["token_type_hint"] == "access_token"
+
+    @pytest.mark.asyncio
+    async def test_revocation_without_endpoint_succeeds(self) -> None:
+        """Test that revocation succeeds when server doesn't support it."""
+        metadata = AuthServerMetadata(
+            issuer="https://auth.example.com",
+            authorization_endpoint="https://auth.example.com/authorize",
+            token_endpoint="https://auth.example.com/token",
+            revocation_endpoint=None,  # No revocation support
+        )
+        client = ClientCredentials(client_id="test_client")
+
+        # Should return True without making any request
+        result = await revoke_token(
+            auth_server_metadata=metadata,
+            client=client,
+            token="test_token",
+        )
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_revocation_failure_returns_false(self) -> None:
+        """Test that revocation failure returns False (doesn't raise)."""
+        metadata = AuthServerMetadata(
+            issuer="https://auth.example.com",
+            authorization_endpoint="https://auth.example.com/authorize",
+            token_endpoint="https://auth.example.com/token",
+            revocation_endpoint="https://auth.example.com/revoke",
+        )
+        client = ClientCredentials(client_id="test_client")
+
+        mock_response = MagicMock()
+        mock_response.status_code = 500  # Server error
+
+        mock_http = AsyncMock()
+        mock_http.post = AsyncMock(return_value=mock_response)
+        mock_http.aclose = AsyncMock()
+
+        result = await revoke_token(
+            auth_server_metadata=metadata,
+            client=client,
+            token="test_token",
+            http_client=mock_http,
+        )
+
+        # Should return False, not raise
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_revocation_network_error_returns_false(self) -> None:
+        """Test that network errors during revocation return False."""
+        import httpx
+
+        metadata = AuthServerMetadata(
+            issuer="https://auth.example.com",
+            authorization_endpoint="https://auth.example.com/authorize",
+            token_endpoint="https://auth.example.com/token",
+            revocation_endpoint="https://auth.example.com/revoke",
+        )
+        client = ClientCredentials(client_id="test_client")
+
+        mock_http = AsyncMock()
+        mock_http.post = AsyncMock(side_effect=httpx.RequestError("Network error"))
+        mock_http.aclose = AsyncMock()
+
+        result = await revoke_token(
+            auth_server_metadata=metadata,
+            client=client,
+            token="test_token",
+            http_client=mock_http,
+        )
+
+        # Should return False, not raise
+        assert result is False
+
+    def test_supports_revocation_true(self) -> None:
+        """Test supports_revocation returns True with endpoint."""
+        metadata = AuthServerMetadata(
+            issuer="https://auth.example.com",
+            authorization_endpoint="https://auth.example.com/authorize",
+            token_endpoint="https://auth.example.com/token",
+            revocation_endpoint="https://auth.example.com/revoke",
+        )
+        assert metadata.supports_revocation() is True
+
+    def test_supports_revocation_false(self) -> None:
+        """Test supports_revocation returns False without endpoint."""
+        metadata = AuthServerMetadata(
+            issuer="https://auth.example.com",
+            authorization_endpoint="https://auth.example.com/authorize",
+            token_endpoint="https://auth.example.com/token",
+        )
+        assert metadata.supports_revocation() is False

@@ -78,6 +78,7 @@ class AuthServerMetadata:
     authorization_endpoint: str
     token_endpoint: str
     registration_endpoint: str | None = None
+    revocation_endpoint: str | None = None
     scopes_supported: list[str] | None = None
     response_types_supported: list[str] = field(default_factory=lambda: ["code"])
     grant_types_supported: list[str] = field(
@@ -93,6 +94,10 @@ class AuthServerMetadata:
     def supports_dcr(self) -> bool:
         """Check if the server supports Dynamic Client Registration."""
         return self.registration_endpoint is not None
+
+    def supports_revocation(self) -> bool:
+        """Check if the server supports token revocation (RFC 7009)."""
+        return self.revocation_endpoint is not None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AuthServerMetadata":
@@ -114,11 +119,17 @@ class AuthServerMetadata:
         if registration_endpoint:
             _require_https(registration_endpoint, "Registration endpoint")
 
+        # Revocation endpoint is optional (RFC 7009), but if present must use HTTPS
+        revocation_endpoint = data.get("revocation_endpoint")
+        if revocation_endpoint:
+            _require_https(revocation_endpoint, "Revocation endpoint")
+
         return cls(
             issuer=data["issuer"],
             authorization_endpoint=auth_endpoint,
             token_endpoint=token_endpoint,
             registration_endpoint=registration_endpoint,
+            revocation_endpoint=revocation_endpoint,
             scopes_supported=data.get("scopes_supported"),
             response_types_supported=data.get("response_types_supported", ["code"]),
             grant_types_supported=data.get(

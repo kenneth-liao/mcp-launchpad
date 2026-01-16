@@ -424,12 +424,22 @@ class TestCLIAuth:
    - Removed raw response.text from error messages
    - Only extract safe error/error_description fields
 
-### Phase 2: High Priority (Before Production)
+### Phase 2: High Priority (Before Production) - COMPLETED
 
-5. **Add flow.py tests** - State validation, PKCE binding
-6. **Add manager.py tests** - Token refresh logic
-7. **Implement token revocation** - RFC 7009 support
-8. **Add CLI auth tests** - Input handling
+5. **Token revocation on logout** - RFC 7009 - DONE
+   - Added `revoke_token()` function to flow.py
+   - Added `logout_async()` method to OAuthManager
+   - CLI now calls async logout for server-side revocation
+   - 7 new tests for revocation functionality
+6. **File locking for token storage** - Race condition fix - DONE
+   - Added cross-platform file locking (fcntl/msvcrt)
+   - Read operations use shared locks
+   - Write operations use exclusive locks
+7. **Thread-safe OAuthManager singleton** - DONE
+   - Added threading.Lock with double-checked locking pattern
+8. **Add revocation_endpoint support** - DONE
+   - Added to AuthServerMetadata with HTTPS validation
+   - Added `supports_revocation()` method
 
 ### Phase 3: Medium Priority (Next Sprint)
 

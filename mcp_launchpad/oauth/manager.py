@@ -5,11 +5,12 @@ both the CLI and daemon to manage authentication for MCP servers.
 """
 
 import logging
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .discovery import OAuthConfig, discover_oauth_config
-from .flow import OAuthFlow, OAuthFlowError, TokenExchangeError, refresh_token
+from .flow import OAuthFlow, OAuthFlowError, TokenExchangeError, refresh_token, revoke_token
 from .store import TokenStore
 from .tokens import TokenSet
 
@@ -292,7 +293,10 @@ class OAuthManager:
             return False
 
     def logout(self, server_url: str) -> bool:
-        """Remove stored authentication for a server.
+        """Remove stored authentication for a server (sync version).
+
+        Note: This does not revoke tokens server-side. Use logout_async()
+        for full logout with token revocation.
 
         Args:
             server_url: The MCP server URL
@@ -300,6 +304,63 @@ class OAuthManager:
         Returns:
             True if token was deleted, False if not found
         """
+        deleted = self._store.delete_token(server_url)
+        if deleted:
+            logger.info(f"Logged out from {server_url}")
+        return deleted
+
+    async def logout_async(self, server_url: str) -> bool:
+        """Remove stored authentication with server-side token revocation.
+
+        This method attempts to revoke tokens on the authorization server
+        before deleting them locally, per RFC 7009. If revocation fails
+        (e.g., server doesn't support it), local tokens are still deleted.
+
+        Args:
+            server_url: The MCP server URL
+
+        Returns:
+            True if token was deleted, False if not found
+        """
+        # Get token before deleting
+        token = self._store.get_token(server_url)
+        if token is None:
+            return False
+
+        # Try to get OAuth config for revocation
+        oauth_config = self._oauth_configs.get(server_url)
+        if oauth_config is None:
+            try:
+                oauth_config = await discover_oauth_config(server_url)
+                self._oauth_configs[server_url] = oauth_config
+            except Exception as e:
+                logger.debug(f"Could not discover OAuth config for revocation: {e}")
+                oauth_config = None
+
+        # Attempt server-side revocation if we have config
+        if oauth_config and oauth_config.auth_server_metadata.supports_revocation():
+            auth_server = oauth_config.auth_server_metadata.issuer
+            client = self._store.get_client(auth_server)
+
+            if client:
+                # Revoke access token
+                await revoke_token(
+                    oauth_config.auth_server_metadata,
+                    client,
+                    token.access_token,
+                    token_type_hint="access_token",
+                )
+
+                # Revoke refresh token if present
+                if token.has_refresh_token():
+                    await revoke_token(
+                        oauth_config.auth_server_metadata,
+                        client,
+                        token.refresh_token,  # type: ignore
+                        token_type_hint="refresh_token",
+                    )
+
+        # Always delete local token
         deleted = self._store.delete_token(server_url)
         if deleted:
             logger.info(f"Logged out from {server_url}")
@@ -314,17 +375,24 @@ class OAuthManager:
         return self._store.list_resources()
 
 
-# Global singleton for convenient access
+# Global singleton for convenient access (thread-safe)
 _manager: OAuthManager | None = None
+_manager_lock = threading.Lock()
 
 
 def get_oauth_manager() -> OAuthManager:
-    """Get the global OAuth manager instance.
+    """Get the global OAuth manager instance (thread-safe).
+
+    Uses double-checked locking pattern for efficient thread-safe
+    singleton initialization.
 
     Returns:
         The singleton OAuthManager instance
     """
     global _manager
     if _manager is None:
-        _manager = OAuthManager()
+        with _manager_lock:
+            # Double-check after acquiring lock
+            if _manager is None:
+                _manager = OAuthManager()
     return _manager
