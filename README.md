@@ -7,6 +7,7 @@ A lightweight CLI for efficiently discovering and executing tools from multiple 
 - **Unified Tool Discovery** - Search across all configured MCP servers with BM25, regex, or exact matching
 - **Persistent Connections** - Session daemon maintains server connections for faster repeated calls
 - **HTTP & Stdio Support** - Connect to both local process-based servers and remote HTTP/Streamable MCP servers
+- **OAuth 2.1 Authentication** - Secure authentication for OAuth-protected MCP servers (Notion, Figma, etc.)
 - **Auto-Configuration** - Reads from `./mcp.json` (project-level) or `~/.claude/mcp.json` (user-level) for seamless integration
 - **Cross-Platform** - Works on macOS, Linux, and Windows (experimental)
 - **JSON Mode** - Machine-readable output for scripting and automation
@@ -189,6 +190,18 @@ mcpl session status   # Show daemon status and connected servers
 mcpl session stop     # Stop the session daemon
 ```
 
+### `mcpl auth login|logout|status`
+
+Manage OAuth 2.1 authentication for HTTP servers.
+
+```bash
+mcpl auth login notion    # Authenticate with an OAuth-protected server
+mcpl auth logout notion   # Remove stored authentication
+mcpl auth logout --all    # Clear all stored tokens
+mcpl auth status          # Show authentication status for all servers
+mcpl auth status notion   # Show status for a specific server
+```
+
 ### `mcpl enable|disable <server>`
 
 Enable or disable servers without modifying the config file.
@@ -312,6 +325,84 @@ HTTP/Streamable MCP servers allow you to connect to remote MCP endpoints over HT
 - Environment variables in `url` and `headers` are resolved using `${VAR}` syntax
 - HTTP servers use the [Streamable HTTP transport](https://modelcontextprotocol.io/docs/concepts/transports#streamable-http) from the MCP specification
 - Connection timeout is controlled by `MCPL_CONNECTION_TIMEOUT` (default: 45 seconds)
+
+### OAuth 2.1 Authentication
+
+MCP Launchpad supports OAuth 2.1 authentication for connecting to OAuth-protected MCP servers (Notion, Figma, etc.).
+
+#### Quick Start
+
+```bash
+# Authenticate with an OAuth-protected server
+mcpl auth login notion
+
+# Check authentication status
+mcpl auth status
+
+# Remove authentication
+mcpl auth logout notion
+```
+
+#### Auth Commands
+
+| Command | Description |
+|---------|-------------|
+| `mcpl auth login <server>` | Authenticate with an OAuth-protected server |
+| `mcpl auth logout <server>` | Remove stored authentication |
+| `mcpl auth logout --all` | Clear all stored tokens |
+| `mcpl auth status [server]` | Show authentication status |
+
+#### Login Options
+
+```bash
+mcpl auth login server --force              # Force re-authentication
+mcpl auth login server --scope "read write" # Custom scopes
+mcpl auth login server --client-id "id"     # Specific client ID
+
+# Secure secret input (recommended)
+echo "secret" | mcpl auth login server --client-secret-stdin
+
+# Or via environment variable
+export MCPL_CLIENT_SECRET="secret"
+```
+
+#### OAuth Configuration
+
+Pre-configure OAuth credentials in `mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "notion": {
+      "type": "http",
+      "url": "https://api.notion.com/mcp",
+      "oauth_client_id": "${NOTION_CLIENT_ID}",
+      "oauth_client_secret": "${NOTION_CLIENT_SECRET}",
+      "oauth_scopes": ["read", "write"]
+    }
+  }
+}
+```
+
+#### Client Registration Strategy
+
+MCP Launchpad uses a flexible registration approach:
+
+1. **Config file** - Pre-configured credentials in `mcp.json`
+2. **DCR** - Dynamic Client Registration if supported by the server
+3. **Interactive** - Manual input as fallback
+
+This approach is more flexible than Claude Code, which requires DCR support.
+
+#### Security Features
+
+- **Fernet encryption** (AES-128-CBC + HMAC) for tokens at rest
+- **OS keyring integration** (Keychain on macOS, libsecret on Linux, DPAPI on Windows)
+- **PKCE with S256** (RFC 7636) for secure authorization
+- **Token revocation** on logout (RFC 7009)
+- **HTTPS enforcement** for all OAuth endpoints
+
+> **Note:** If OS keyring is unavailable, a warning will be displayed and tokens will use fallback encryption.
 
 ### Environment Variables
 
