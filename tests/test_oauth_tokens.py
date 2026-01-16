@@ -177,6 +177,23 @@ class TestTokenSet:
         )
         assert token.get_auth_header() == "Bearer abc123"
 
+    def test_get_auth_header_normalizes_bearer_casing(self):
+        """Test that get_auth_header normalizes token_type to 'Bearer' (capital B).
+
+        Some OAuth servers (like Notion) return 'bearer' (lowercase) in their
+        token response, but RFC 6750 specifies 'Bearer' with capital B, and
+        some resource servers do case-sensitive validation.
+        """
+        # Token with lowercase 'bearer' from server response
+        token = TokenSet(
+            access_token="abc123",
+            token_type="bearer",  # lowercase as returned by some OAuth servers
+            resource="https://api.example.com",
+        )
+        # Should normalize to "Bearer" (capital B)
+        assert token.get_auth_header() == "Bearer abc123"
+        assert token.get_auth_header().startswith("Bearer ")  # Capital B
+
 
 class TestClientCredentials:
     """Tests for ClientCredentials dataclass."""

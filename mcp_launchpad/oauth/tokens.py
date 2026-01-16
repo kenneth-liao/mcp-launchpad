@@ -162,7 +162,9 @@ class TokenSet:
         Returns:
             Authorization header value (e.g., "Bearer abc123...")
         """
-        return f"{self.token_type} {self.access_token}"
+        # Always use "Bearer" (capital B) per RFC 6750, regardless of
+        # what token_type the OAuth server returned (some return lowercase)
+        return f"Bearer {self.access_token}"
 
 
 @dataclass
