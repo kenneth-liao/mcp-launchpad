@@ -4,9 +4,12 @@ This module provides the TokenSet dataclass for representing OAuth tokens
 with their metadata, including expiry handling and serialization.
 """
 
+import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -48,6 +51,10 @@ class TokenSet:
         if self.expires_at is None:
             # No expiry information - assume token is still valid
             # The server will return 401 if it's actually expired
+            logger.debug(
+                f"Token for {self.resource} has no expires_at - assuming valid. "
+                f"Server will return 401 if token is actually expired."
+            )
             return False
 
         now = datetime.now(timezone.utc)
@@ -57,9 +64,22 @@ class TokenSet:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
 
         # Check if token expires within the buffer period
-        from datetime import timedelta
+        is_expired = now >= (expires_at - timedelta(seconds=buffer_seconds))
 
-        return now >= (expires_at - timedelta(seconds=buffer_seconds))
+        # Log warning if token expired very quickly (possible clock skew)
+        if is_expired and self.issued_at:
+            token_lifetime = (expires_at - self.issued_at).total_seconds()
+            time_since_issue = (now - self.issued_at).total_seconds()
+            # If token "expired" within a very short time after issuance,
+            # there may be clock skew between client and server
+            if time_since_issue < 60 and token_lifetime > 60:
+                logger.warning(
+                    f"Token for {self.resource} appears expired only {time_since_issue:.0f}s "
+                    f"after issuance (lifetime: {token_lifetime:.0f}s). "
+                    f"This may indicate clock skew between client and server."
+                )
+
+        return is_expired
 
     def has_refresh_token(self) -> bool:
         """Check if this token set has a refresh token."""
@@ -142,8 +162,6 @@ class TokenSet:
         # Calculate expiry time from expires_in if provided
         expires_at = None
         if "expires_in" in response:
-            from datetime import timedelta
-
             expires_at = now + timedelta(seconds=int(response["expires_in"]))
 
         return cls(

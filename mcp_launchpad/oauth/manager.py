@@ -10,9 +10,9 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 from urllib.parse import urlparse
 
-from .discovery import OAuthConfig, discover_oauth_config
+from .discovery import DiscoveryError, OAuthConfig, discover_oauth_config
 from .flow import OAuthFlow, OAuthFlowError, TokenExchangeError, refresh_token, revoke_token
-from .store import TokenStore
+from .store import TokenDecryptionError, TokenStore
 from .tokens import TokenSet
 
 logger = logging.getLogger(__name__)
@@ -126,13 +126,20 @@ class OAuthManager:
         """
         # Try exact URL match first
         token = self._store.get_token(server_url)
+        if token is not None:
+            logger.debug(f"Token found for exact URL: {server_url}")
+            return token
 
         # If not found, try base URL (scheme + netloc) for resource URI match
-        if token is None:
-            parsed = urlparse(server_url)
-            base_url = f"{parsed.scheme}://{parsed.netloc}"
-            if base_url != server_url:  # Only try if different
-                token = self._store.get_token(base_url)
+        parsed = urlparse(server_url)
+        base_url = f"{parsed.scheme}://{parsed.netloc}"
+        if base_url != server_url:  # Only try if different
+            token = self._store.get_token(base_url)
+            if token is not None:
+                logger.debug(
+                    f"Token found using base URL fallback: {base_url} "
+                    f"(original: {server_url})"
+                )
 
         return token
 
@@ -144,8 +151,21 @@ class OAuthManager:
 
         Returns:
             True if we have a valid token
+
+        Raises:
+            TokenDecryptionError: If token storage cannot be decrypted
+                (encryption key changed, corrupted data)
         """
-        token = self._lookup_token(server_url)
+        try:
+            token = self._lookup_token(server_url)
+        except TokenDecryptionError:
+            # Re-raise to let caller handle - they may want to prompt re-auth
+            logger.warning(
+                f"Token storage decryption failed for {server_url}. "
+                f"Encryption key may have changed."
+            )
+            raise
+
         if token is None:
             return False
 
@@ -272,25 +292,38 @@ class OAuthManager:
         """
         token = self._store.get_token(server_url)
         if token is None:
+            logger.debug(f"No token stored for {server_url}, cannot refresh")
             return False
 
         # Token is still valid
         if not token.is_expired():
+            logger.debug(f"Token for {server_url} is still valid, no refresh needed")
             return True
+
+        # Token is expired - log details
+        expires_info = f" (expired at {token.expires_at})" if token.expires_at else ""
+        logger.info(f"Token for {server_url} has expired{expires_info}, attempting refresh")
 
         # No refresh token available
         if not token.has_refresh_token():
-            logger.info(f"Token for {server_url} expired, no refresh token available")
+            logger.info(
+                f"Token for {server_url} expired but no refresh token available. "
+                f"User must re-authenticate."
+            )
             return False
 
         # Get OAuth config (may need to discover)
         oauth_config = self._oauth_configs.get(server_url)
         if oauth_config is None:
             try:
+                logger.debug(f"Discovering OAuth config for {server_url} to refresh token")
                 oauth_config = await discover_oauth_config(server_url)
                 self._oauth_configs[server_url] = oauth_config
+            except DiscoveryError as e:
+                logger.warning(f"OAuth discovery failed during token refresh: {e}")
+                return False
             except Exception as e:
-                logger.warning(f"Could not discover OAuth config for refresh: {e}")
+                logger.warning(f"Unexpected error during OAuth discovery for refresh: {e}")
                 return False
 
         # Get client credentials

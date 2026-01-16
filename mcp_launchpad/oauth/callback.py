@@ -160,16 +160,24 @@ def find_available_port() -> int:
         if MIN_PORT <= port <= MAX_PORT:
             return port
 
-    # Fallback: try ports in range
+    # Fallback: try ports in range (OS assigned a port outside ephemeral range)
+    logger.debug(
+        f"OS-assigned port {port} outside ephemeral range ({MIN_PORT}-{MAX_PORT}), "
+        f"scanning for available port..."
+    )
     for port in range(MIN_PORT, MAX_PORT + 1):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.bind(("127.0.0.1", port))
+                logger.debug(f"Found available port via scanning: {port}")
                 return port
         except OSError:
             continue
 
-    raise CallbackError("No available port found for callback server")
+    raise CallbackError(
+        f"No available port found for callback server in range {MIN_PORT}-{MAX_PORT}. "
+        f"Ensure some ports are available for localhost connections."
+    )
 
 
 def parse_callback_url(url: str) -> CallbackResult:
@@ -279,11 +287,20 @@ class LocalhostCallbackServer:
             await asyncio.wait_for(self._result_event.wait(), timeout=self.timeout)
         except TimeoutError:
             raise CallbackTimeoutError(
-                f"Timeout waiting for OAuth callback after {self.timeout} seconds"
+                f"Timeout waiting for OAuth callback after {self.timeout} seconds.\n\n"
+                f"Possible causes:\n"
+                f"- Browser popup was blocked - check your browser's popup blocker\n"
+                f"- Browser did not open - copy the authorization URL and open it manually\n"
+                f"- Authorization was not completed in the browser\n"
+                f"- Network or firewall blocking localhost connections\n\n"
+                f"Try running the command again or use --timeout to increase the wait time."
             ) from None
 
         if self._result is None:
-            raise CallbackError("No callback result received")
+            raise CallbackError(
+                "No callback result received. "
+                "The callback server received a request but could not parse the OAuth response."
+            )
 
         return self._result
 
