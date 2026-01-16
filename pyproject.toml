@@ -1,6 +1,6 @@
 [project]
 name = "mcp-launchpad"
-version = "0.1.1"
+version = "0.1.2"
 description = "A lightweight CLI for efficiently discovering and executing MCP server tools"
 readme = "README.md"
 requires-python = ">=3.13"
