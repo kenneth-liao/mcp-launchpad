@@ -189,7 +189,16 @@ class SessionClient:
         raise RuntimeError(error_msg)
 
     async def _is_daemon_running(self) -> bool:
-        """Check if the daemon is currently running."""
+        """Check if the daemon is currently running and responsive.
+
+        This performs two checks:
+        1. PID file exists and process is alive
+        2. Daemon actually responds to a status ping
+
+        The second check is important because the process could be alive but
+        the IPC server might not be accepting connections (e.g., during startup
+        or if something went wrong).
+        """
         # Check PID file
         pid_file = get_pid_file_path()
         socket_path = get_socket_path()
@@ -211,15 +220,27 @@ class SessionClient:
         except (ValueError, OSError):
             return False
 
-        # Try to connect
-        connection = await connect_to_daemon()
-        if connection:
-            reader, writer = connection
-            writer.close()
-            await writer.wait_closed()
-            return True
+        # Process is alive - now verify it responds to IPC requests.
+        # This sends an actual status message rather than just testing connectivity,
+        # which is required on Windows where the named pipe server blocks on ReadFile.
+        try:
+            connection = await asyncio.wait_for(connect_to_daemon(), timeout=2.0)
+            if not connection:
+                return False
 
-        return False
+            reader, writer = connection
+            try:
+                # Send a status ping and wait for response
+                ping_msg = IPCMessage(action="status", payload={})
+                await asyncio.wait_for(write_message(writer, ping_msg), timeout=2.0)
+                response = await asyncio.wait_for(read_message(reader), timeout=2.0)
+                return response is not None and response.action == "result"
+            finally:
+                writer.close()
+                await writer.wait_closed()
+        except (asyncio.TimeoutError, OSError, Exception) as e:
+            logger.debug(f"Daemon ping failed: {e}")
+            return False
 
     async def _cleanup_legacy_daemon(self) -> None:
         """Clean up any legacy daemon from before path format change.
