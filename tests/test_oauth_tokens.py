@@ -177,6 +177,23 @@ class TestTokenSet:
         )
         assert token.get_auth_header() == "Bearer abc123"
 
+    def test_get_auth_header_normalizes_bearer_casing(self):
+        """Test that get_auth_header normalizes token_type to 'Bearer' (capital B).
+
+        Some OAuth servers (like Notion) return 'bearer' (lowercase) in their
+        token response, but RFC 6750 specifies 'Bearer' with capital B, and
+        some resource servers do case-sensitive validation.
+        """
+        # Token with lowercase 'bearer' from server response
+        token = TokenSet(
+            access_token="abc123",
+            token_type="bearer",  # lowercase as returned by some OAuth servers
+            resource="https://api.example.com",
+        )
+        # Should normalize to "Bearer" (capital B)
+        assert token.get_auth_header() == "Bearer abc123"
+        assert token.get_auth_header().startswith("Bearer ")  # Capital B
+
 
 class TestClientCredentials:
     """Tests for ClientCredentials dataclass."""
@@ -229,3 +246,44 @@ class TestClientCredentials:
         client = ClientCredentials.from_dict(data)
         assert client.client_id == "my_client_id"
         assert client.client_secret == "my_secret"
+
+    def test_redirect_uri_stored(self):
+        """Test that redirect_uri is stored for DCR credentials."""
+        client = ClientCredentials(
+            client_id="my_client_id",
+            redirect_uri="http://127.0.0.1:8080/callback",
+        )
+        assert client.redirect_uri == "http://127.0.0.1:8080/callback"
+
+    def test_to_dict_with_redirect_uri(self):
+        """Test serialization includes redirect_uri when present."""
+        client = ClientCredentials(
+            client_id="my_client_id",
+            redirect_uri="http://127.0.0.1:8080/callback",
+        )
+        data = client.to_dict()
+        assert data["client_id"] == "my_client_id"
+        assert data["redirect_uri"] == "http://127.0.0.1:8080/callback"
+
+    def test_to_dict_no_redirect_uri(self):
+        """Test serialization omits redirect_uri when None."""
+        client = ClientCredentials(client_id="my_client_id")
+        data = client.to_dict()
+        assert "redirect_uri" not in data
+
+    def test_from_dict_with_redirect_uri(self):
+        """Test deserialization includes redirect_uri."""
+        data = {
+            "client_id": "my_client_id",
+            "redirect_uri": "http://127.0.0.1:8080/callback",
+        }
+        client = ClientCredentials.from_dict(data)
+        assert client.client_id == "my_client_id"
+        assert client.redirect_uri == "http://127.0.0.1:8080/callback"
+
+    def test_from_dict_without_redirect_uri(self):
+        """Test deserialization handles missing redirect_uri (backwards compat)."""
+        data = {"client_id": "my_client_id"}
+        client = ClientCredentials.from_dict(data)
+        assert client.client_id == "my_client_id"
+        assert client.redirect_uri is None

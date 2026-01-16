@@ -8,6 +8,7 @@ import logging
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from .discovery import OAuthConfig, discover_oauth_config
 from .flow import OAuthFlow, OAuthFlowError, TokenExchangeError, refresh_token, revoke_token
@@ -106,6 +107,35 @@ class OAuthManager:
         """Get the token store."""
         return self._store
 
+    def _lookup_token(self, server_url: str) -> TokenSet | None:
+        """Look up token with fallback to base URL.
+
+        Tries multiple lookup strategies:
+        1. Exact server URL match
+        2. Base URL (scheme + netloc) match for resource URI compatibility
+
+        This handles the case where tokens are stored by resource URI
+        (e.g., https://mcp.notion.com) but lookups use the full server URL
+        (e.g., https://mcp.notion.com/mcp).
+
+        Args:
+            server_url: The MCP server URL
+
+        Returns:
+            TokenSet if found, None otherwise
+        """
+        # Try exact URL match first
+        token = self._store.get_token(server_url)
+
+        # If not found, try base URL (scheme + netloc) for resource URI match
+        if token is None:
+            parsed = urlparse(server_url)
+            base_url = f"{parsed.scheme}://{parsed.netloc}"
+            if base_url != server_url:  # Only try if different
+                token = self._store.get_token(base_url)
+
+        return token
+
     def has_valid_token(self, server_url: str) -> bool:
         """Check if we have a valid (non-expired) token for a server.
 
@@ -115,7 +145,7 @@ class OAuthManager:
         Returns:
             True if we have a valid token
         """
-        token = self._store.get_token(server_url)
+        token = self._lookup_token(server_url)
         if token is None:
             return False
 
@@ -130,7 +160,7 @@ class OAuthManager:
         Returns:
             TokenSet if found, None otherwise
         """
-        return self._store.get_token(server_url)
+        return self._lookup_token(server_url)
 
     def get_auth_header(self, server_url: str) -> str | None:
         """Get the Authorization header value for a server.
@@ -141,7 +171,7 @@ class OAuthManager:
         Returns:
             Authorization header value (e.g., "Bearer abc...") or None
         """
-        token = self._store.get_token(server_url)
+        token = self._lookup_token(server_url)
         if token is None:
             return None
 

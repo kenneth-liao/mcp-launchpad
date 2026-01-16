@@ -408,8 +408,11 @@ async def discover_oauth_config(
                 f"which is required by the MCP specification"
             )
 
-        # Step 5: Compute resource URI
-        resource_uri = compute_resource_uri(server_url)
+        # Step 5: Get resource URI from Protected Resource Metadata (RFC 9728)
+        # The resource metadata's "resource" field is authoritative - it tells us
+        # what resource identifier to use for RFC 8707 resource indicators.
+        # Only fall back to computing from URL if metadata doesn't specify it.
+        resource_uri = resource_metadata.resource or compute_resource_uri(server_url)
 
         return OAuthConfig(
             resource_metadata=resource_metadata,

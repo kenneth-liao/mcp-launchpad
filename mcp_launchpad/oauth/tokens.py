@@ -162,7 +162,9 @@ class TokenSet:
         Returns:
             Authorization header value (e.g., "Bearer abc123...")
         """
-        return f"{self.token_type} {self.access_token}"
+        # Always use "Bearer" (capital B) per RFC 6750, regardless of
+        # what token_type the OAuth server returned (some return lowercase)
+        return f"Bearer {self.access_token}"
 
 
 @dataclass
@@ -171,10 +173,16 @@ class ClientCredentials:
 
     Stores client_id and optional client_secret for OAuth flows.
     Public clients (like CLIs) may not have a client_secret.
+
+    For DCR-obtained credentials, redirect_uri tracks the URI registered
+    with the authorization server. This is needed because DCR binds the
+    client to specific redirect URIs, and using a different URI will
+    cause token exchange to fail.
     """
 
     client_id: str
     client_secret: str | None = None
+    redirect_uri: str | None = None
 
     def is_confidential(self) -> bool:
         """Check if this is a confidential client (has a secret)."""
@@ -185,6 +193,8 @@ class ClientCredentials:
         data: dict[str, Any] = {"client_id": self.client_id}
         if self.client_secret:
             data["client_secret"] = self.client_secret
+        if self.redirect_uri:
+            data["redirect_uri"] = self.redirect_uri
         return data
 
     @classmethod
@@ -193,4 +203,5 @@ class ClientCredentials:
         return cls(
             client_id=data["client_id"],
             client_secret=data.get("client_secret"),
+            redirect_uri=data.get("redirect_uri"),
         )

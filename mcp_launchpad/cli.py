@@ -406,6 +406,84 @@ def call(
         output.error(e, help_text=help_text)
 
 
+def _handle_oauth_required_servers(
+    ctx: click.Context,
+    config: Config,
+    cache: ToolCache,
+    servers: list[str],
+) -> None:
+    """Prompt user to authenticate with servers that require OAuth.
+
+    For each server in the list, asks the user if they want to authenticate.
+    If they agree, runs the OAuth flow and retries the connection.
+    """
+    oauth_manager = get_oauth_manager()
+
+    for server_name in servers:
+        server_config = config.servers.get(server_name)
+        if not server_config or not server_config.is_http():
+            continue
+
+        url = server_config.get_resolved_url()
+
+        # Check if already authenticated (token might have been obtained earlier in loop)
+        if oauth_manager.has_valid_token(url):
+            continue
+
+        click.echo()
+        click.secho(
+            f"Server '{server_name}' requires OAuth authentication.", fg="yellow"
+        )
+
+        # Prompt user
+        if not click.confirm("Would you like to authenticate now?", default=True):
+            click.echo(f"Skipped. Run 'mcpl auth login {server_name}' to authenticate later.")
+            continue
+
+        # Run OAuth flow
+        click.echo()
+        try:
+            def on_status(message: str) -> None:
+                click.echo(f"  {message}")
+
+            token = asyncio.run(
+                oauth_manager.authenticate(
+                    server_url=url,
+                    client_id=server_config.get_resolved_oauth_client_id(),
+                    client_secret=server_config.get_resolved_oauth_client_secret(),
+                    scopes=server_config.oauth_scopes or None,
+                    on_status=on_status,
+                )
+            )
+
+            click.secho(f"✓ Authenticated with '{server_name}'", fg="green")
+
+            # Retry connection for this server
+            click.echo(f"  Retrying connection...")
+
+            def retry_progress(
+                name: str, status: str, tool_count: int | None, error: str | None
+            ) -> None:
+                if status == "done":
+                    click.secho(f"  [{name}] ", fg="cyan", nl=False)
+                    click.secho("OK", fg="green", nl=False)
+                    click.echo(f" ({tool_count} tools)")
+                elif status == "error":
+                    click.secho(f"  [{name}] ", fg="cyan", nl=False)
+                    click.secho("FAILED", fg="red", nl=False)
+                    click.echo(f" - {error}")
+
+            asyncio.run(
+                cache.refresh(force=True, on_progress=retry_progress, servers=[server_name])
+            )
+
+        except OAuthFlowError as e:
+            click.secho(f"✗ Authentication failed: {e}", fg="red")
+            click.echo(f"  Run 'mcpl auth login {server_name}' to try again.")
+        except Exception as e:
+            click.secho(f"✗ Error: {e}", fg="red")
+
+
 @main.command("list")
 @click.argument("server", required=False)
 @click.option("--refresh", is_flag=True, help="Refresh the tool cache")
@@ -429,6 +507,9 @@ def list_cmd(ctx: click.Context, server: str | None, refresh: bool) -> None:
         if not ctx.obj["json_mode"]:
             click.secho("\nRefreshing tool cache...\n", bold=True)
 
+        # Track servers that need OAuth authentication
+        oauth_required_servers: list[str] = []
+
         def on_progress(
             server_name: str, status: str, tool_count: int | None, error: str | None
         ) -> None:
@@ -448,8 +529,13 @@ def list_cmd(ctx: click.Context, server: str | None, refresh: bool) -> None:
                 # Move cursor up one line and overwrite
                 click.echo("\033[A\033[K", nl=False)
                 click.secho(f"  [{server_name}] ", fg="cyan", nl=False)
-                click.secho("FAILED", fg="red", nl=False)
-                click.echo(f" - {error}")
+                # Check if this is an OAuth error
+                if error and "requires OAuth" in error:
+                    click.secho("AUTH REQUIRED", fg="yellow")
+                    oauth_required_servers.append(server_name)
+                else:
+                    click.secho("FAILED", fg="red", nl=False)
+                    click.echo(f" - {error}")
 
         try:
             asyncio.run(
@@ -464,6 +550,14 @@ def list_cmd(ctx: click.Context, server: str | None, refresh: bool) -> None:
                     click.secho(f"  [{name}] ", fg="cyan", nl=False)
                     click.secho("SKIPPED", dim=True, nl=False)
                     click.echo(" (disabled)")
+
+            # Handle servers that need OAuth authentication
+            if oauth_required_servers and not ctx.obj["json_mode"]:
+                click.echo()
+                _handle_oauth_required_servers(
+                    ctx, config, cache, oauth_required_servers
+                )
+
             if not ctx.obj["json_mode"]:
                 click.secho("\nTool cache refreshed.", fg="green")
         except Exception as e:
