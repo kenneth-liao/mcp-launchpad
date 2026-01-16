@@ -1,5 +1,6 @@
 """Tests for OAuth flow module."""
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -422,6 +423,151 @@ class TestHTTPSEnforcement:
 
         assert "HTTPS" in str(exc_info.value)
         assert "Revocation endpoint" in str(exc_info.value)
+
+
+class TestStoredCredentialsRedirectUri:
+    """Tests for redirect_uri validation when reusing stored credentials."""
+
+    @pytest.mark.asyncio
+    async def test_stored_credentials_used_when_redirect_uri_matches(self) -> None:
+        """Test that stored credentials are used when redirect_uri matches."""
+        from mcp_launchpad.oauth.discovery import OAuthConfig
+        from mcp_launchpad.oauth.store import TokenStore
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as tmpdir:
+            store = TokenStore(store_dir=Path(tmpdir))
+
+            # Store credentials with specific redirect_uri
+            stored_creds = ClientCredentials(
+                client_id="stored_client",
+                redirect_uri="http://127.0.0.1:8080/callback",
+            )
+            store.set_client("https://auth.example.com", stored_creds)
+
+            # Create flow with stored credentials
+            flow = OAuthFlow(
+                server_url="https://api.example.com",
+                token_store=store,
+            )
+
+            # Mock OAuth config
+            flow._oauth_config = MagicMock(spec=OAuthConfig)
+            flow._oauth_config.auth_server_metadata = AuthServerMetadata(
+                issuer="https://auth.example.com",
+                authorization_endpoint="https://auth.example.com/authorize",
+                token_endpoint="https://auth.example.com/token",
+            )
+
+            # Same redirect_uri should return stored credentials
+            result = await flow.get_client_credentials(
+                redirect_uri="http://127.0.0.1:8080/callback"
+            )
+
+            assert result.client_id == "stored_client"
+            assert result.redirect_uri == "http://127.0.0.1:8080/callback"
+
+    @pytest.mark.asyncio
+    async def test_stored_credentials_rejected_on_redirect_uri_mismatch(self) -> None:
+        """Test that stored DCR credentials are rejected when redirect_uri differs.
+
+        This is the core test for the bug fix: when a different callback port is used,
+        stored DCR credentials should be invalidated to prevent token exchange failure.
+        """
+        from mcp_launchpad.oauth.discovery import OAuthConfig
+        from mcp_launchpad.oauth.store import TokenStore
+        from tempfile import TemporaryDirectory
+        from pathlib import Path
+
+        with TemporaryDirectory() as tmpdir:
+            store = TokenStore(store_dir=Path(tmpdir))
+
+            # Store credentials from previous DCR with specific redirect_uri
+            stored_creds = ClientCredentials(
+                client_id="old_client",
+                redirect_uri="http://127.0.0.1:52847/callback",  # Old port
+            )
+            store.set_client("https://auth.example.com", stored_creds)
+
+            # Create flow
+            flow = OAuthFlow(
+                server_url="https://api.example.com",
+                token_store=store,
+            )
+
+            # Mock OAuth config with DCR support
+            flow._oauth_config = MagicMock(spec=OAuthConfig)
+            flow._oauth_config.auth_server_metadata = AuthServerMetadata(
+                issuer="https://auth.example.com",
+                authorization_endpoint="https://auth.example.com/authorize",
+                token_endpoint="https://auth.example.com/token",
+                registration_endpoint="https://auth.example.com/register",
+            )
+
+            # Mock DCR response for fresh registration
+            mock_response = MagicMock()
+            mock_response.status_code = 201
+            mock_response.json.return_value = {
+                "client_id": "new_client_from_dcr",
+            }
+
+            mock_http = AsyncMock()
+            mock_http.post = AsyncMock(return_value=mock_response)
+            mock_http.aclose = AsyncMock()
+
+            # Patch the httpx client creation
+            with patch("mcp_launchpad.oauth.flow.httpx.AsyncClient", return_value=mock_http):
+                # Different redirect_uri (different port) should trigger fresh DCR
+                result = await flow.get_client_credentials(
+                    redirect_uri="http://127.0.0.1:49283/callback"  # New port
+                )
+
+            # Should have performed fresh DCR, not reused old credentials
+            assert result.client_id == "new_client_from_dcr"
+            assert result.redirect_uri == "http://127.0.0.1:49283/callback"
+
+    @pytest.mark.asyncio
+    async def test_stored_credentials_without_redirect_uri_are_reused(self) -> None:
+        """Test backwards compatibility: credentials without redirect_uri are reused.
+
+        Existing stored credentials (from before this fix) won't have redirect_uri.
+        They should still be reused for backwards compatibility.
+        """
+        from mcp_launchpad.oauth.discovery import OAuthConfig
+        from mcp_launchpad.oauth.store import TokenStore
+        from tempfile import TemporaryDirectory
+        from pathlib import Path
+
+        with TemporaryDirectory() as tmpdir:
+            store = TokenStore(store_dir=Path(tmpdir))
+
+            # Store credentials without redirect_uri (legacy format)
+            stored_creds = ClientCredentials(
+                client_id="legacy_client",
+                redirect_uri=None,  # No redirect_uri stored
+            )
+            store.set_client("https://auth.example.com", stored_creds)
+
+            # Create flow
+            flow = OAuthFlow(
+                server_url="https://api.example.com",
+                token_store=store,
+            )
+
+            # Mock OAuth config
+            flow._oauth_config = MagicMock(spec=OAuthConfig)
+            flow._oauth_config.auth_server_metadata = AuthServerMetadata(
+                issuer="https://auth.example.com",
+                authorization_endpoint="https://auth.example.com/authorize",
+                token_endpoint="https://auth.example.com/token",
+            )
+
+            # Should still reuse legacy credentials
+            result = await flow.get_client_credentials(
+                redirect_uri="http://127.0.0.1:8080/callback"
+            )
+
+            assert result.client_id == "legacy_client"
 
 
 class TestRevokeToken:

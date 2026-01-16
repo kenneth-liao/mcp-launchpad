@@ -480,8 +480,16 @@ class OAuthFlow:
         # 2. Check for stored DCR credentials
         stored = self.token_store.get_client(auth_server)
         if stored:
-            self._emit_status("Using stored client credentials")
-            return stored
+            # Only reuse DCR credentials if redirect_uri matches (or wasn't stored)
+            # DCR binds client to specific redirect URIs, mismatches cause token exchange to fail
+            if stored.redirect_uri is None or stored.redirect_uri == redirect_uri:
+                self._emit_status("Using stored client credentials")
+                return stored
+            else:
+                # redirect_uri changed (different port), need fresh DCR
+                logger.debug(
+                    f"Stored redirect_uri mismatch: {stored.redirect_uri} != {redirect_uri}"
+                )
 
         # 3. Try Dynamic Client Registration
         if self._oauth_config.auth_server_metadata.supports_dcr():
@@ -491,6 +499,8 @@ class OAuthFlow:
                     self._oauth_config.auth_server_metadata,
                     redirect_uri,
                 )
+                # Store redirect_uri with credentials for future validation
+                credentials.redirect_uri = redirect_uri
                 # Store for future use
                 self.token_store.set_client(auth_server, credentials)
                 self._emit_status("Client registered successfully")
