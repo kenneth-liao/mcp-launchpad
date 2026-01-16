@@ -18,6 +18,7 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.types import Tool
 
 from .config import Config, ServerConfig
+from .oauth import get_oauth_manager
 
 # Logger for connection management
 logger = logging.getLogger("mcpl.connection")
@@ -35,15 +36,13 @@ class OAuthRequiredError(Exception):
 
         message = (
             f"Server '{server_name}' requires OAuth authentication.\n\n"
-            f"URL: {url}\n\n"
-            "mcpl does not currently support OAuth authentication flows.\n\n"
-            "Options:\n"
-            "1. Use Claude Code or Claude Desktop to authenticate first\n"
-            "   (Note: OAuth tokens are tied to specific clients per MCP spec)\n"
-            "2. If the server supports static API keys, configure headers:\n"
-            '   Add to config: "headers": {"Authorization": "Bearer ${TOKEN}"}\n'
-            "3. Wait for OAuth support in a future mcpl release\n\n"
-            "See: https://github.com/kenneth-liao/mcp-launchpad/issues/7"
+            f"To authenticate, run:\n"
+            f"  mcpl auth login {server_name}\n\n"
+            f"This will open a browser for authorization.\n\n"
+            f"Alternatively:\n"
+            f"- If the server supports static API keys, configure headers:\n"
+            f'  Add to config: "headers": {{"Authorization": "Bearer ${{TOKEN}}"}}\n\n'
+            f"See: https://github.com/kenneth-liao/mcp-launchpad/issues/7"
         )
         super().__init__(message)
 
@@ -185,6 +184,15 @@ class ConnectionManager:
         """Connect to an HTTP-based MCP server."""
         url = server_config.get_resolved_url()
         headers = server_config.get_resolved_headers()
+
+        # Inject OAuth token if available and no Authorization header configured
+        if "Authorization" not in headers:
+            oauth_manager = get_oauth_manager()
+            auth_header = oauth_manager.get_auth_header(url)
+            if auth_header:
+                headers["Authorization"] = auth_header
+                logger.debug(f"Using stored OAuth token for '{server_name}'")
+
         logger.debug(f"Connecting to HTTP server '{server_name}' at {url}")
 
         if not url:

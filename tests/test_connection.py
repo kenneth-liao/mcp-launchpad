@@ -307,16 +307,18 @@ class TestOAuthRequiredError:
         assert "notion" in str(error)
         assert "requires OAuth authentication" in str(error)
 
-    def test_error_message_includes_url(self):
-        """Test that error message includes the URL."""
+    def test_error_stores_url_attribute(self):
+        """Test that error stores the URL as an attribute."""
         error = OAuthRequiredError("notion", "https://api.notion.com/mcp")
-        assert "https://api.notion.com/mcp" in str(error)
+        assert error.url == "https://api.notion.com/mcp"
 
     def test_error_message_includes_options(self):
         """Test that error message includes helpful options."""
         error = OAuthRequiredError("notion", "https://api.notion.com/mcp")
         message = str(error)
-        assert "Claude Code" in message or "Claude Desktop" in message
+        # Should mention how to authenticate
+        assert "mcpl auth login" in message
+        # Should mention alternative options
         assert "headers" in message
         assert "Bearer" in message
 

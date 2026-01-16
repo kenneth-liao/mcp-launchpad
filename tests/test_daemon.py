@@ -539,8 +539,8 @@ class TestDaemonOAuthHandling:
 
         Users should understand:
         1. What went wrong (OAuth required)
-        2. Why mcpl can't handle it (tokens are client-specific)
-        3. What they can do (use Claude, configure headers, wait for support)
+        2. How to fix it (mcpl auth login)
+        3. What alternatives exist (configure static headers)
         """
         with patch("mcp_launchpad.daemon.get_parent_pid", return_value=12345):
             daemon = Daemon(http_server_config)
@@ -563,9 +563,10 @@ class TestDaemonOAuthHandling:
             # Should mention OAuth
             assert "OAuth" in error_msg
 
-            # Should provide alternatives
-            assert "Claude" in error_msg  # Suggest using Claude Code
-            assert "headers" in error_msg  # Suggest static auth if available
+            # Should tell user how to authenticate
+            assert "mcpl auth login" in error_msg
+            # Should suggest static headers as alternative
+            assert "headers" in error_msg
 
     @pytest.mark.asyncio
     async def test_non_401_http_error_still_retries(self, http_server_config):

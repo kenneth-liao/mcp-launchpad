@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any, NoReturn
@@ -15,6 +16,7 @@ from . import __version__
 from .cache import ToolCache
 from .config import Config, load_config
 from .connection import ConnectionManager, ToolInfo
+from .oauth import OAuthFlowError, TokenDecryptionError, get_oauth_manager
 from .output import OutputHandler
 from .search import SearchMethod, ToolSearcher
 from .session import SessionClient
@@ -649,6 +651,443 @@ def session_stop(ctx: click.Context) -> None:
                     "The daemon may have crashed. Socket and PID files will be cleaned up on next run."
                 ),
             )
+
+
+# =============================================================================
+# OAuth Authentication Commands
+# =============================================================================
+
+
+@main.group()
+@click.pass_context
+def auth(ctx: click.Context) -> None:
+    """Manage OAuth authentication for MCP servers.
+
+    OAuth authentication allows mcpl to connect to MCP servers that require
+    authorization, such as Notion, Figma, and other remote services.
+    """
+    pass
+
+
+@auth.command("login")
+@click.argument("server")
+@click.option("--scope", multiple=True, help="Additional scopes to request")
+@click.option("--force", is_flag=True, help="Force re-authentication even if already logged in")
+@click.option("--client-id", help="Use a specific OAuth client ID")
+@click.option(
+    "--client-secret-stdin",
+    is_flag=True,
+    help="Read client secret from stdin (one line)",
+)
+@click.option("--timeout", default=120, help="Timeout for browser callback (seconds)")
+@click.pass_context
+def auth_login(
+    ctx: click.Context,
+    server: str,
+    scope: tuple[str, ...],
+    force: bool,
+    client_id: str | None,
+    client_secret_stdin: bool,
+    timeout: int,
+) -> None:
+    """Authenticate with an OAuth-protected MCP server.
+
+    Opens a browser for authorization and stores tokens securely.
+    Tokens are encrypted and stored in ~/.cache/mcp-launchpad/oauth/
+
+    Client secret can be provided via:
+      - MCPL_CLIENT_SECRET environment variable
+      - Config file with oauth_client_secret (supports $ENV interpolation)
+      - Interactive prompt (when DCR is unavailable)
+      - --client-secret-stdin flag (reads one line from stdin)
+
+    Example:
+        mcpl auth login notion
+        mcpl auth login figma --scope "read write"
+        mcpl auth login custom --client-id my-client-id
+        echo "secret" | mcpl auth login custom --client-id my-id --client-secret-stdin
+    """
+    output: OutputHandler = ctx.obj["output"]
+    config = get_config(ctx)
+
+    # Validate server exists
+    if server not in config.servers:
+        available = ", ".join(sorted(config.servers.keys()))
+        output.error(
+            ValueError(f"Server '{server}' not found"),
+            help_text=f"Available servers: {available}",
+        )
+        return
+
+    server_config = config.servers[server]
+
+    # Check if it's an HTTP server
+    if not server_config.is_http():
+        output.error(
+            ValueError(f"Server '{server}' is a stdio server, not HTTP"),
+            help_text="OAuth authentication is only supported for HTTP servers.",
+        )
+        return
+
+    url = server_config.get_resolved_url()
+    oauth_manager = get_oauth_manager()
+
+    # Check if already authenticated (unless --force)
+    try:
+        has_token = oauth_manager.has_valid_token(url)
+    except TokenDecryptionError:
+        # Token storage corrupted/key changed - proceed with login to overwrite
+        if not ctx.obj["json_mode"]:
+            click.secho(
+                "Warning: Could not read existing tokens (encryption key changed?).",
+                fg="yellow",
+            )
+            click.echo("Proceeding with fresh authentication...")
+            click.echo()
+        has_token = False
+
+    if not force and has_token:
+        if ctx.obj["json_mode"]:
+            output.success({"server": server, "status": "already_authenticated"})
+        else:
+            click.secho(f"Already authenticated with '{server}'.", fg="green")
+            click.echo("Use --force to re-authenticate.")
+        return
+
+    # Get client credentials
+    # Priority: stdin > env var > config
+    config_client_id = client_id or server_config.get_resolved_oauth_client_id()
+
+    # Resolve client secret from multiple sources
+    resolved_client_secret: str | None = None
+    if client_secret_stdin:
+        # Read from stdin (non-interactive)
+        if sys.stdin.isatty():
+            output.error(
+                ValueError("--client-secret-stdin requires piped input"),
+                help_text="Usage: echo 'secret' | mcpl auth login server --client-secret-stdin",
+            )
+            return
+        resolved_client_secret = sys.stdin.readline().rstrip("\n") or None
+    elif os.environ.get("MCPL_CLIENT_SECRET"):
+        resolved_client_secret = os.environ["MCPL_CLIENT_SECRET"]
+    else:
+        resolved_client_secret = server_config.get_resolved_oauth_client_secret()
+
+    config_client_secret = resolved_client_secret
+
+    # Status callback for CLI feedback
+    def on_status(message: str) -> None:
+        if not ctx.obj["json_mode"]:
+            click.echo(message)
+
+    # Prompt callback for manual client registration
+    def prompt_for_credentials() -> tuple[str, str | None]:
+        click.echo()
+        click.secho(
+            "Dynamic Client Registration is not available for this server.",
+            fg="yellow",
+        )
+        click.echo("You'll need to register mcpl manually with the authorization server.")
+        click.echo()
+        entered_client_id = click.prompt("Enter client_id")
+        entered_client_secret = click.prompt(
+            "Enter client_secret (leave blank for public client)",
+            default="",
+            show_default=False,
+            hide_input=True,
+        )
+        return entered_client_id, entered_client_secret or None
+
+    # Run OAuth flow
+    try:
+        scopes = list(scope) if scope else server_config.oauth_scopes or None
+
+        token = asyncio.run(
+            oauth_manager.authenticate(
+                server_url=url,
+                client_id=config_client_id,
+                client_secret=config_client_secret,
+                scopes=scopes,
+                callback_timeout=timeout,
+                on_status=on_status,
+                prompt_for_credentials=prompt_for_credentials,
+            )
+        )
+
+        if ctx.obj["json_mode"]:
+            output.success(
+                {
+                    "server": server,
+                    "status": "authenticated",
+                    "expires_at": token.expires_at.isoformat() if token.expires_at else None,
+                    "scope": token.scope,
+                }
+            )
+        else:
+            click.echo()
+            click.secho(f"Successfully authenticated with '{server}'!", fg="green")
+            click.echo("Tokens stored securely in ~/.cache/mcp-launchpad/oauth/")
+
+            # Warn if using fallback encryption (no keyring)
+            if not oauth_manager.token_store.is_using_keyring():
+                click.echo()
+                click.secho(
+                    "Warning: OS keyring not available. Using fallback encryption.",
+                    fg="yellow",
+                )
+                click.echo(
+                    "Tokens are encrypted but with reduced security. "
+                    "Consider installing a keyring backend."
+                )
+
+            # Restart daemon to use new token
+            click.echo()
+            click.echo("Restarting session daemon to use new credentials...")
+            session_client = SessionClient(config)
+            try:
+                asyncio.run(session_client.shutdown())
+            except Exception:
+                pass  # Daemon may not be running
+
+    except OAuthFlowError as e:
+        output.error(
+            e,
+            help_text=(
+                "OAuth authentication failed.\n\n"
+                "Common issues:\n"
+                "- The authorization server may not support Dynamic Client Registration\n"
+                "- You may need to configure oauth_client_id in your config\n"
+                "- The server may have denied the authorization request"
+            ),
+        )
+
+
+@auth.command("logout")
+@click.argument("server", required=False)
+@click.option("--all", "logout_all", is_flag=True, help="Clear all stored tokens and credentials")
+@click.pass_context
+def auth_logout(ctx: click.Context, server: str | None, logout_all: bool) -> None:
+    """Remove stored authentication for a server.
+
+    This deletes the stored OAuth tokens for the specified server.
+    Use --all to clear all stored tokens (useful when encryption key changes).
+
+    Example:
+        mcpl auth logout notion
+        mcpl auth logout --all
+    """
+    output: OutputHandler = ctx.obj["output"]
+    config = get_config(ctx)
+    oauth_manager = get_oauth_manager()
+
+    # Handle --all flag
+    if logout_all:
+        oauth_manager.token_store.clear_all()
+        if ctx.obj["json_mode"]:
+            output.success({"action": "clear_all", "success": True})
+        else:
+            click.secho("Cleared all stored authentication data.", fg="green")
+        return
+
+    # Server is required if not using --all
+    if not server:
+        output.error(
+            ValueError("SERVER argument is required unless using --all"),
+            help_text="Usage: mcpl auth logout <server> or mcpl auth logout --all",
+        )
+        return
+
+    # Validate server exists
+    if server not in config.servers:
+        available = ", ".join(sorted(config.servers.keys()))
+        output.error(
+            ValueError(f"Server '{server}' not found"),
+            help_text=f"Available servers: {available}",
+        )
+        return
+
+    server_config = config.servers[server]
+    if not server_config.is_http():
+        output.error(
+            ValueError(f"Server '{server}' is a stdio server"),
+            help_text="OAuth authentication is only relevant for HTTP servers.",
+        )
+        return
+
+    url = server_config.get_resolved_url()
+
+    try:
+        # Use async logout for server-side token revocation (RFC 7009)
+        if not ctx.obj["json_mode"]:
+            click.echo(f"Logging out from '{server}'...")
+
+        deleted = asyncio.run(oauth_manager.logout_async(url))
+    except TokenDecryptionError:
+        # Can't read tokens, but we can still try to clear them
+        click.secho(
+            "Warning: Could not read existing tokens (encryption key changed?).",
+            fg="yellow",
+        )
+        click.echo("Use 'mcpl auth logout --all' to clear all stored data.")
+        return
+
+    if ctx.obj["json_mode"]:
+        output.success({"server": server, "logged_out": deleted})
+    else:
+        if deleted:
+            click.secho(f"Logged out from '{server}'.", fg="green")
+            click.echo("Tokens revoked and deleted locally.")
+        else:
+            click.echo(f"No stored authentication found for '{server}'.")
+
+
+@auth.command("status")
+@click.argument("server", required=False)
+@click.pass_context
+def auth_status(ctx: click.Context, server: str | None) -> None:
+    """Show authentication status for servers.
+
+    Without SERVER argument, shows status for all HTTP servers.
+    With SERVER argument, shows detailed status for that server.
+
+    Example:
+        mcpl auth status
+        mcpl auth status notion
+    """
+    output: OutputHandler = ctx.obj["output"]
+    config = get_config(ctx)
+    oauth_manager = get_oauth_manager()
+
+    if server:
+        # Show status for specific server
+        if server not in config.servers:
+            available = ", ".join(sorted(config.servers.keys()))
+            output.error(
+                ValueError(f"Server '{server}' not found"),
+                help_text=f"Available servers: {available}",
+            )
+            return
+
+        server_config = config.servers[server]
+        if not server_config.is_http():
+            output.error(
+                ValueError(f"Server '{server}' is a stdio server"),
+                help_text="OAuth authentication is only relevant for HTTP servers.",
+            )
+            return
+
+        url = server_config.get_resolved_url()
+
+        try:
+            status = oauth_manager.get_auth_status(url, server)
+        except TokenDecryptionError:
+            output.error(
+                ValueError("Cannot read stored tokens"),
+                help_text=(
+                    "The token storage file cannot be decrypted.\n"
+                    "This usually means the encryption key has changed.\n\n"
+                    "To fix: Run 'mcpl auth logout --all' to clear tokens,\n"
+                    "then re-authenticate with 'mcpl auth login <server>'."
+                ),
+            )
+            return
+
+        if ctx.obj["json_mode"]:
+            output.success(status.to_dict())
+        else:
+            click.secho(f"\nOAuth Status for [{server}]:\n", bold=True)
+            if status.authenticated:
+                if status.expired:
+                    click.secho("  Status: ", nl=False)
+                    click.secho("expired", fg="yellow")
+                else:
+                    click.secho("  Status: ", nl=False)
+                    click.secho("authenticated", fg="green")
+
+                if status.expires_at:
+                    click.echo(f"  Expires: {status.expires_at}")
+                if status.scope:
+                    click.echo(f"  Scopes: {status.scope}")
+                click.echo(f"  Has refresh token: {status.has_refresh_token}")
+
+                if status.expired:
+                    click.echo()
+                    click.secho(f"  Run: mcpl auth login {server}", fg="cyan")
+            else:
+                click.secho("  Status: ", nl=False)
+                click.secho("not authenticated", fg="red")
+                click.echo()
+                click.secho(f"  Run: mcpl auth login {server}", fg="cyan")
+
+            # Warn if using fallback encryption (no keyring)
+            if not oauth_manager.token_store.is_using_keyring():
+                click.echo()
+                click.secho(
+                    "Warning: OS keyring not available. Using fallback encryption.",
+                    fg="yellow",
+                )
+    else:
+        # Show status for all HTTP servers
+        try:
+            statuses = []
+            for name, server_config in config.servers.items():
+                if server_config.is_http():
+                    url = server_config.get_resolved_url()
+                    status = oauth_manager.get_auth_status(url, name)
+                    statuses.append(status)
+        except TokenDecryptionError:
+            output.error(
+                ValueError("Cannot read stored tokens"),
+                help_text=(
+                    "The token storage file cannot be decrypted.\n"
+                    "This usually means the encryption key has changed.\n\n"
+                    "To fix: Run 'mcpl auth logout --all' to clear tokens,\n"
+                    "then re-authenticate with 'mcpl auth login <server>'."
+                ),
+            )
+            return
+
+        if ctx.obj["json_mode"]:
+            output.success({"servers": [s.to_dict() for s in statuses]})
+        else:
+            if not statuses:
+                click.echo("No HTTP servers configured.")
+                return
+
+            click.secho("\nOAuth Authentication Status:\n", bold=True)
+            for status in statuses:
+                click.secho(f"  [{status.server_name}] ", fg="cyan", nl=False)
+
+                if status.authenticated:
+                    if status.expired:
+                        click.secho("expired", fg="yellow")
+                        if status.expires_at:
+                            click.echo(f"    Expired: {status.expires_at}")
+                    else:
+                        click.secho("authenticated", fg="green")
+                        if status.expires_at:
+                            click.echo(f"    Expires: {status.expires_at}")
+                        if status.scope:
+                            click.echo(f"    Scopes: {status.scope}")
+                else:
+                    click.secho("not authenticated", fg="red")
+
+            click.echo()
+
+            # Warn if using fallback encryption (no keyring)
+            if not oauth_manager.token_store.is_using_keyring():
+                click.secho(
+                    "Warning: OS keyring not available. Using fallback encryption.",
+                    fg="yellow",
+                )
+                click.echo()
+
+            # Show hint for unauthenticated servers
+            unauthenticated = [s for s in statuses if not s.authenticated]
+            if unauthenticated:
+                click.echo("To authenticate: ", nl=False)
+                click.secho("mcpl auth login <server>", fg="cyan")
 
 
 @main.command()
