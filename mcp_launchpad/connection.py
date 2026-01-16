@@ -13,6 +13,7 @@ from typing import Any, TextIO, cast
 
 import httpx
 from mcp import ClientSession, StdioServerParameters
+from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import Tool
@@ -166,11 +167,14 @@ class ConnectionManager:
         """Connect to an MCP server and yield the session.
 
         This is a context manager that handles connection lifecycle.
-        Supports both stdio and HTTP transport types.
+        Supports sse, stdio, and HTTP transport types.
         """
         server_config = self.get_server_config(server_name)
 
-        if server_config.is_http():
+        if server_config.is_sse():  # Check SSE first (before is_http since both return as true)
+            async with self._connect_sse(server_name, server_config) as session:
+                yield session
+        elif server_config.is_http():
             async with self._connect_http(server_name, server_config) as session:
                 yield session
         else:
@@ -359,6 +363,61 @@ class ConnectionManager:
                     # Append stderr to the error message
                     raise type(e)(f"{e}\n\nServer output:\n{stderr_output}") from e
                 raise
+
+    @asynccontextmanager
+    async def _connect_sse(
+        self, server_name: str, server_config: ServerConfig
+    ) -> AsyncGenerator[ClientSession]:
+        """Connect to a legacy SSE-based MCP server.
+
+        This transport type uses Server-Sent Events for bidirectional communication:
+        - Client connects to SSE endpoint (GET)
+        - Server sends endpoint URL via 'endpoint' event
+        - Client POSTs messages to that endpoint
+        - Server sends responses via 'message' events on SSE stream
+        """
+        url = server_config.get_resolved_url()
+        headers = server_config.get_resolved_headers()
+        logger.debug(f"Connecting to SSE server '{server_name}' at {url}")
+
+        if not url:
+            raise ValueError(
+                f"SSE server '{server_name}' is missing 'url' in configuration.\n\n"
+                f"Example config:\n"
+                f'{{\n  "mcpServers": {{\n'
+                f'    "{server_name}": {{\n'
+                f'      "type": "sse",\n'
+                f'      "url": "http://example.com/mcp/sse"\n'
+                f"    }}\n  }}\n}}"
+            )
+
+        try:
+            async with asyncio.timeout(CONNECTION_TIMEOUT):
+                async with sse_client(
+                    url,
+                    headers=headers,
+                    timeout=30.0,
+                    sse_read_timeout=CONNECTION_TIMEOUT,
+                ) as (read, write):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        logger.debug(f"SSE connection to '{server_name}' initialized")
+                        yield session
+                        logger.debug(f"SSE connection to '{server_name}' closing")
+        except TimeoutError as e:
+            raise TimeoutError(
+                f"Connection to '{server_name}' timed out after {CONNECTION_TIMEOUT}s.\n\n"
+                f"The SSE server may be slow or unresponsive.\n\n"
+                f"URL: {url}\n\n"
+                f"Try increasing timeout: export MCPL_CONNECTION_TIMEOUT=120"
+            ) from e
+        except httpx.ConnectError as e:
+            raise ConnectionError(
+                f"Could not connect to '{server_name}' SSE server.\n\n"
+                f"URL: {url}\n\n"
+                f"Error: {e}\n\n"
+                f"Check that the URL is correct and the server is running."
+            ) from e
 
     async def list_tools(self, server_name: str) -> list[ToolInfo]:
         """List all tools from a specific server."""
