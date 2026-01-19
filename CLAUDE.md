@@ -51,6 +51,8 @@ mcpl session status         # Check daemon and server connection status
 mcpl session stop           # Restart daemon (stops current, auto-restarts on next call)
 mcpl config                 # Show current configuration
 mcpl call <server> <tool> '{}' --no-daemon  # Bypass daemon for debugging
+mcpl auth status            # Check OAuth authentication status
+mcpl auth login <server>    # Authenticate with OAuth-protected server
 ```
 
 ### Common Issues
@@ -58,6 +60,8 @@ mcpl call <server> <tool> '{}' --no-daemon  # Bypass daemon for debugging
 - **Server not connecting**: Run `mcpl verify` to test connections
 - **Stale connections**: Run `mcpl session stop` then retry
 - **Timeout errors**: Server may be slow; increase with `MCPL_CONNECTION_TIMEOUT=120`
+- **OAuth authentication required**: Run `mcpl auth login <server>` to authenticate
+- **Token expired**: Run `mcpl auth login <server> --force` to re-authenticate
 
 ## Quick Reference
 
