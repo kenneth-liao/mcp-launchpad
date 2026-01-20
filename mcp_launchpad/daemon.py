@@ -179,13 +179,19 @@ class Daemon:
         url = server_config.get_resolved_url()
         headers = server_config.get_resolved_headers()
 
-        # Inject OAuth token if available and no static Authorization header configured
+        # Inject API key or OAuth token if available and no Authorization header configured
         if "Authorization" not in headers:
-            oauth_manager = get_oauth_manager()
-            auth_header = oauth_manager.get_auth_header(url)
-            if auth_header:
-                headers["Authorization"] = auth_header
-                logger.debug(f"Using stored OAuth token for '{server_name}'")
+            # Priority: 1) Static API key, 2) OAuth token
+            api_key = server_config.get_resolved_api_key()
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+                logger.debug(f"Using static API key for '{server_name}'")
+            else:
+                oauth_manager = get_oauth_manager()
+                auth_header = oauth_manager.get_auth_header(url)
+                if auth_header:
+                    headers["Authorization"] = auth_header
+                    logger.debug(f"Using stored OAuth token for '{server_name}'")
 
         if not url:
             server_state = ServerState(
@@ -388,6 +394,20 @@ class Daemon:
                     f"Error: {e}"
                 )
                 logger.error(f"Server {server_name}: {server_state.error}")
+            except httpx.HTTPStatusError as e:
+                # Handle OAuth-requiring servers (401 Unauthorized)
+                if e.response.status_code == 401:
+                    www_auth = e.response.headers.get("WWW-Authenticate")
+                    oauth_error = OAuthRequiredError(server_name, url, www_auth)
+                    server_state.error = str(oauth_error)
+                    logger.warning(f"Server {server_name}: OAuth authentication required")
+                    return  # Don't retry - user action required
+                else:
+                    server_state.error = (
+                        f"HTTP error connecting to SSE server: {e.response.status_code}\n"
+                        f"URL: {url}"
+                    )
+                    logger.error(f"Server {server_name}: {server_state.error}")
             except asyncio.CancelledError:
                 logger.debug(f"Server {server_name}: connection task cancelled")
                 return

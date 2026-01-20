@@ -627,3 +627,205 @@ class TestDaemonOAuthHandling:
             assert "oauth-server" in status["servers"]
             assert status["servers"]["oauth-server"]["connected"] is False
             assert "OAuth" in status["servers"]["oauth-server"]["error"]
+
+
+class TestDaemonSSETransport:
+    """Tests for SSE transport support in daemon.
+
+    These tests verify that the daemon correctly handles SSE-based MCP servers,
+    including routing, authentication, and error handling.
+    """
+
+    @pytest.fixture
+    def sse_server_config(self):
+        """Create a config with an SSE server."""
+        return Config(
+            servers={
+                "sse-server": ServerConfig(
+                    name="sse-server",
+                    server_type="sse",
+                    url="https://sse.example.com/mcp",
+                    headers={},
+                ),
+            },
+            config_path=Path("/tmp/test-config.json"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_sse_server_uses_sse_transport(self, sse_server_config):
+        """Test that SSE servers are routed to _connect_sse_server.
+
+        Servers with type: "sse" should use SSE transport, not HTTP.
+        This is critical because is_http() returns True for both types.
+        """
+        with patch("mcp_launchpad.daemon.get_parent_pid", return_value=12345):
+            daemon = Daemon(sse_server_config)
+            daemon.state.running = True
+
+            sse_connect_called = False
+            http_connect_called = False
+
+            async def mock_sse_connect(name, config):
+                nonlocal sse_connect_called
+                sse_connect_called = True
+
+            async def mock_http_connect(name, config):
+                nonlocal http_connect_called
+                http_connect_called = True
+
+            with patch.object(
+                daemon, "_connect_sse_server", side_effect=mock_sse_connect
+            ):
+                with patch.object(
+                    daemon, "_connect_http_server", side_effect=mock_http_connect
+                ):
+                    await daemon._connect_server("sse-server")
+
+            assert sse_connect_called is True
+            assert http_connect_called is False
+
+    @pytest.mark.asyncio
+    async def test_sse_connection_timeout(self, sse_server_config):
+        """Test that SSE connection timeout is handled correctly."""
+        with patch("mcp_launchpad.daemon.get_parent_pid", return_value=12345):
+            with patch("mcp_launchpad.daemon.MAX_RECONNECT_ATTEMPTS", 1):
+                daemon = Daemon(sse_server_config)
+                daemon.state.running = True
+
+                with patch(
+                    "mcp_launchpad.daemon.sse_client",
+                    side_effect=TimeoutError("Connection timed out"),
+                ):
+                    await daemon._connect_server("sse-server")
+
+                server_state = daemon.state.servers.get("sse-server")
+                assert server_state is not None
+                assert server_state.connected is False
+                assert "timed out" in server_state.error.lower()
+
+    @pytest.mark.asyncio
+    async def test_sse_oauth_required_no_retry(self, sse_server_config):
+        """Test that SSE servers requiring OAuth don't trigger retry.
+
+        When an SSE server returns 401 (OAuth required), the daemon should
+        not retry because user authentication is needed.
+        """
+        with patch("mcp_launchpad.daemon.get_parent_pid", return_value=12345):
+            with patch("mcp_launchpad.daemon.MAX_RECONNECT_ATTEMPTS", 3):
+                daemon = Daemon(sse_server_config)
+                daemon.state.running = True
+
+                # Create a 401 response for OAuth
+                mock_response = MagicMock()
+                mock_response.status_code = 401
+                mock_response.headers = {"WWW-Authenticate": "Bearer"}
+
+                with patch(
+                    "mcp_launchpad.daemon.sse_client",
+                    side_effect=httpx.HTTPStatusError(
+                        "401 Unauthorized",
+                        request=MagicMock(),
+                        response=mock_response,
+                    ),
+                ):
+                    await daemon._connect_server("sse-server")
+
+                server_state = daemon.state.servers.get("sse-server")
+                assert server_state is not None
+                assert server_state.connected is False
+                assert "OAuth" in server_state.error
+
+    @pytest.mark.asyncio
+    async def test_sse_connection_error(self, sse_server_config):
+        """Test that SSE connection errors are handled and retried."""
+        with patch("mcp_launchpad.daemon.get_parent_pid", return_value=12345):
+            with patch("mcp_launchpad.daemon.MAX_RECONNECT_ATTEMPTS", 2):
+                with patch("mcp_launchpad.daemon.RECONNECT_DELAY", 0.01):
+                    daemon = Daemon(sse_server_config)
+                    daemon.state.running = True
+
+                    attempt_count = 0
+
+                    def mock_sse(*args, **kwargs):
+                        nonlocal attempt_count
+                        attempt_count += 1
+                        raise httpx.ConnectError("Connection refused")
+
+                    with patch(
+                        "mcp_launchpad.daemon.sse_client",
+                        side_effect=mock_sse,
+                    ):
+                        await daemon._connect_server("sse-server")
+
+                    # Should have retried
+                    assert attempt_count == 2
+
+                    server_state = daemon.state.servers.get("sse-server")
+                    assert server_state is not None
+                    assert "Could not connect" in server_state.error
+
+    @pytest.mark.asyncio
+    async def test_sse_missing_url_error(self):
+        """Test that SSE server without URL returns clear error."""
+        config = Config(
+            servers={
+                "bad-sse-server": ServerConfig(
+                    name="bad-sse-server",
+                    server_type="sse",
+                    url="",  # Missing URL
+                    headers={},
+                ),
+            },
+            config_path=Path("/tmp/test-config.json"),
+        )
+
+        with patch("mcp_launchpad.daemon.get_parent_pid", return_value=12345):
+            daemon = Daemon(config)
+            daemon.state.running = True
+
+            await daemon._connect_server("bad-sse-server")
+
+            server_state = daemon.state.servers.get("bad-sse-server")
+            assert server_state is not None
+            assert "missing" in server_state.error.lower()
+            assert "url" in server_state.error.lower()
+
+    @pytest.mark.asyncio
+    async def test_sse_api_key_injection(self, sse_server_config):
+        """Test that SSE servers can use static API keys."""
+        # Create config with API key
+        config = Config(
+            servers={
+                "sse-with-key": ServerConfig(
+                    name="sse-with-key",
+                    server_type="sse",
+                    url="https://sse.example.com/mcp",
+                    api_key="test-api-key",
+                    headers={},
+                ),
+            },
+            config_path=Path("/tmp/test-config.json"),
+        )
+
+        with patch("mcp_launchpad.daemon.get_parent_pid", return_value=12345):
+            daemon = Daemon(config)
+            daemon.state.running = True
+
+            captured_headers = None
+
+            def mock_sse(url, headers=None, **kwargs):
+                nonlocal captured_headers
+                captured_headers = headers
+                raise TimeoutError("Stop early")
+
+            with patch("mcp_launchpad.daemon.MAX_RECONNECT_ATTEMPTS", 1):
+                with patch(
+                    "mcp_launchpad.daemon.sse_client",
+                    side_effect=mock_sse,
+                ):
+                    await daemon._connect_server("sse-with-key")
+
+            # Check that API key was injected
+            assert captured_headers is not None
+            assert "Authorization" in captured_headers
+            assert captured_headers["Authorization"] == "Bearer test-api-key"
