@@ -196,8 +196,12 @@ class TestGetSessionId:
         monkeypatch.setenv("WT_SESSION", "windows-terminal-guid")
         assert get_session_id() == "windows-terminal-guid"
 
-    def test_falls_back_to_parent_pid(self, monkeypatch):
-        """Test fallback to parent PID when no session env vars set."""
+    def test_falls_back_to_parent_pid_or_cwd_hash(self, monkeypatch):
+        """Test fallback when no session env vars set.
+
+        On Unix: falls back to parent PID
+        On Windows: uses cwd hash (since parent PID changes per invocation)
+        """
         monkeypatch.delenv("MCPL_SESSION_ID", raising=False)
         monkeypatch.delenv("TERM_SESSION_ID", raising=False)
         # Clear VS Code/Claude Code env vars
@@ -208,7 +212,13 @@ class TestGetSessionId:
         monkeypatch.delenv("WINDOWID", raising=False)
         monkeypatch.delenv("WT_SESSION", raising=False)
         session_id = get_session_id()
-        assert session_id == str(os.getppid())
+        if IS_WINDOWS:
+            # Windows uses cwd hash for stable session ID
+            assert session_id.startswith("win-")
+            assert len(session_id) == 12  # "win-" + 8 char hash
+        else:
+            # Unix uses parent PID
+            assert session_id == str(os.getppid())
 
 
 class TestGetSocketPath:

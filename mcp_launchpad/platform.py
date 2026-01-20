@@ -87,7 +87,9 @@ def get_session_id() -> str:
     3. VS Code/Claude Code session - extracted from VSCODE_GIT_IPC_HANDLE
     4. WINDOWID - X11 terminals (Linux)
     5. WT_SESSION - Windows Terminal
-    6. Parent PID - fallback (works everywhere)
+    6. Fallback:
+       - Unix: Parent PID (stable within a terminal session)
+       - Windows: CWD hash (parent PID changes per invocation with uv/venv)
     """
     # Explicit override
     if session_id := os.environ.get("MCPL_SESSION_ID"):
@@ -118,7 +120,14 @@ def get_session_id() -> str:
         return session_id
 
     # Fallback to parent PID (works everywhere but not ideal for Claude Code)
-    return str(os.getppid())
+    if IS_WINDOWS:
+        # On Windows, parent PID changes per invocation, so use username + working dir hash
+        # This gives one daemon per user per project directory
+        cwd_hash = hashlib.md5(os.getcwd().encode(), usedforsecurity=False).hexdigest()[:8]
+        return f"win-{cwd_hash}"
+    else:
+        # Unix: parent PID is stable within a terminal session
+        return str(os.getppid())
 
 
 def _shorten_session_id(session_id: str) -> str:
