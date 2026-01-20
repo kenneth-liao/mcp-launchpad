@@ -100,7 +100,8 @@ Copy the root `CLAUDE.md` contents into your own `CLAUDE.md` or `AGENTS.md` to t
 >
 > Agents cannot complete OAuth flows because they require browser interaction. You must authenticate all OAuth-protected MCP servers **before** agents can use them:
 > ```bash
-> mcpl auth login <server>    # Run this yourself for each OAuth server
+> mcpl auth login <server>    # Authenticate a specific server
+> mcpl list --refresh         # Prompts to authenticate each server that requires OAuth
 > mcpl auth status            # Verify all servers are authenticated
 > ```
 
