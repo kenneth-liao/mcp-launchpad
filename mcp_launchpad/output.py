@@ -8,10 +8,30 @@ from typing import Any
 import click
 
 
+def maybe_parse_json(data: Any) -> Any:
+    """Recursively parse JSON strings into objects.
+
+    MCP tools often return JSON as a string. This function detects and parses
+    such strings to provide properly formatted output instead of escaped JSON.
+    """
+    if isinstance(data, str):
+        stripped = data.strip()
+        if stripped.startswith(("{", "[")) and stripped.endswith(("}", "]")):
+            try:
+                return json.loads(data)
+            except json.JSONDecodeError:
+                pass
+    elif isinstance(data, dict):
+        return {k: maybe_parse_json(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [maybe_parse_json(item) for item in data]
+    return data
+
+
 def format_json(data: Any, success: bool = True) -> str:
     """Format data as JSON output."""
     if success:
-        output = {"success": True, "data": data}
+        output = {"success": True, "data": maybe_parse_json(data)}
     else:
         output = data  # Error dict already has success: false
     return json.dumps(output, indent=2, default=str)
@@ -79,7 +99,7 @@ class OutputHandler:
             if human_message:
                 output_human(human_message)
             else:
-                output_human(json.dumps(data, indent=2, default=str))
+                output_human(json.dumps(maybe_parse_json(data), indent=2, default=str))
 
     def error(
         self,

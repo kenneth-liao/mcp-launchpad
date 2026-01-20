@@ -8,6 +8,7 @@ from mcp_launchpad.output import (
     OutputHandler,
     format_error_json,
     format_json,
+    maybe_parse_json,
 )
 
 
@@ -28,12 +29,92 @@ class TestFormatJson:
         assert parsed["success"] is True
         assert parsed["data"] == [1, 2, 3]
 
+    def test_format_json_parses_json_strings(self):
+        """Test that format_json auto-parses JSON strings."""
+        data = {"result": '{"teams": [{"name": "Team A"}]}'}
+        result = format_json(data)
+        parsed = json.loads(result)
+        assert parsed["success"] is True
+        assert parsed["data"]["result"] == {"teams": [{"name": "Team A"}]}
+
     def test_format_success_false(self):
         """Test formatting with success=False."""
         error_data = {"success": False, "error": "message"}
         result = format_json(error_data, success=False)
         parsed = json.loads(result)
         assert parsed == error_data
+
+
+class TestMaybeParseJson:
+    """Tests for maybe_parse_json function."""
+
+    def test_simple_json_string(self):
+        """Test parsing a simple JSON string."""
+        data = '{"key": "value"}'
+        result = maybe_parse_json(data)
+        assert result == {"key": "value"}
+
+    def test_json_array_string(self):
+        """Test parsing a JSON array string."""
+        data = '[1, 2, 3]'
+        result = maybe_parse_json(data)
+        assert result == [1, 2, 3]
+
+    def test_nested_dict_with_json_string(self):
+        """Test parsing nested dict with JSON string values."""
+        data = {
+            "result": '{"teams": [{"name": "Team A"}]}',
+            "other": "plain string",
+        }
+        result = maybe_parse_json(data)
+        assert result == {
+            "result": {"teams": [{"name": "Team A"}]},
+            "other": "plain string",
+        }
+
+    def test_list_with_json_string_items(self):
+        """Test parsing list with JSON string items."""
+        data = ['{"a": 1}', '{"b": 2}']
+        result = maybe_parse_json(data)
+        assert result == [{"a": 1}, {"b": 2}]
+
+    def test_non_json_string_unchanged(self):
+        """Test that non-JSON strings are left untouched."""
+        data = "just a regular string"
+        result = maybe_parse_json(data)
+        assert result == "just a regular string"
+
+    def test_invalid_json_string_unchanged(self):
+        """Test that invalid JSON strings are left as strings."""
+        data = '{"invalid": json}'
+        result = maybe_parse_json(data)
+        assert result == '{"invalid": json}'
+
+    def test_already_parsed_object_unchanged(self):
+        """Test that already-parsed objects remain unchanged."""
+        data = {"key": "value", "nested": {"inner": 123}}
+        result = maybe_parse_json(data)
+        assert result == data
+
+    def test_json_string_with_whitespace(self):
+        """Test parsing JSON string with leading/trailing whitespace."""
+        data = '  {"key": "value"}  '
+        result = maybe_parse_json(data)
+        assert result == {"key": "value"}
+
+    def test_deeply_nested_json_strings(self):
+        """Test parsing deeply nested structures with JSON strings."""
+        data = {
+            "level1": {
+                "level2": '{"level3": {"key": "value"}}',
+            }
+        }
+        result = maybe_parse_json(data)
+        assert result == {
+            "level1": {
+                "level2": {"level3": {"key": "value"}},
+            }
+        }
 
 
 class TestFormatErrorJson:
@@ -110,6 +191,26 @@ class TestOutputHandler:
         # Should output JSON-formatted data
         assert "key" in captured.out
         assert "value" in captured.out
+
+    def test_success_parses_json_strings_json_mode(self, capsys):
+        """Test success output parses JSON strings in JSON mode."""
+        handler = OutputHandler(json_mode=True)
+        handler.success({"result": '{"teams": [{"name": "Team A"}]}'})
+
+        captured = capsys.readouterr()
+        parsed = json.loads(captured.out)
+        assert parsed["success"] is True
+        assert parsed["data"]["result"] == {"teams": [{"name": "Team A"}]}
+
+    def test_success_parses_json_strings_human_mode(self, capsys):
+        """Test success output parses JSON strings in human mode."""
+        handler = OutputHandler(json_mode=False)
+        handler.success({"result": '{"teams": [{"name": "Team A"}]}'})
+
+        captured = capsys.readouterr()
+        parsed = json.loads(captured.out)
+        # Should be parsed, not escaped
+        assert parsed["result"] == {"teams": [{"name": "Team A"}]}
 
     def test_error_json_mode(self, capsys):
         """Test error output in JSON mode."""
