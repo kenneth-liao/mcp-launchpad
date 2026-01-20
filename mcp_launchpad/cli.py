@@ -16,7 +16,6 @@ from . import __version__
 from .cache import ToolCache
 from .config import Config, count_servers_in_config, discover_all_config_files, load_config
 from .config_preferences import (
-    ConfigPreferencesManager,
     get_config_preferences_manager,
     is_interactive,
 )
@@ -182,11 +181,13 @@ def _handle_first_run_prompt(ctx: click.Context) -> None:
                 else:
                     click.secho(f"Invalid number: {part} (must be 1-{len(discovered)})", fg="red")
                     # Fall back to all configs on error
+                    click.secho("Falling back to using all config files.", fg="yellow")
                     selected = discovered
                     break
             except ValueError:
                 click.secho(f"Invalid input: {part}", fg="red")
                 # Fall back to all configs on error
+                click.secho("Falling back to using all config files.", fg="yellow")
                 selected = discovered
                 break
 
@@ -252,7 +253,7 @@ def _resolve_config_reference(ref: str, discovered: list[Path]) -> Path | None:
         discovered: List of discovered config files
 
     Returns:
-        Resolved Path or None if not found
+        Resolved Path or None if not found/ambiguous
     """
     # Try as number first
     try:
@@ -263,15 +264,18 @@ def _resolve_config_reference(ref: str, discovered: list[Path]) -> Path | None:
     except ValueError:
         pass
 
-    # Try as path
+    # Try as exact path
     path = Path(ref).expanduser().resolve()
+    if path in discovered:
+        return path
     if path.exists():
         return path
 
     # Try matching against discovered paths (partial match)
-    for disc_path in discovered:
-        if ref in str(disc_path):
-            return disc_path
+    # Require unique match to avoid ambiguity
+    matches = [disc_path for disc_path in discovered if ref in str(disc_path)]
+    if len(matches) == 1:
+        return matches[0]
 
     return None
 
@@ -291,7 +295,6 @@ def _restart_daemon_for_config_change(output: OutputHandler) -> None:
 
 def _run_interactive_config_selection(
     discovered: list[Path],
-    prefs_manager: ConfigPreferencesManager,
 ) -> list[Path]:
     """Run interactive config file selection.
 
@@ -1782,7 +1785,7 @@ def config_files(
             )
             return
 
-        selected = _run_interactive_config_selection(discovered, prefs_manager)
+        selected = _run_interactive_config_selection(discovered)
         if selected:
             prefs_manager.set_active_configs(selected)
             prefs_manager.mark_first_run_completed()
