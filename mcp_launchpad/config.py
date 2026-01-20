@@ -34,9 +34,10 @@ def _resolve_env_vars(value: str) -> str:
 class ServerConfig:
     """Configuration for a single MCP server.
 
-    Supports two transport types:
+    Supports three transport types:
     - stdio: Local process-based servers (command + args)
     - http: Remote HTTP-based servers (url + optional headers)
+    - sse: Remote SSE-based servers(url + args?)
     """
 
     name: str
@@ -55,7 +56,11 @@ class ServerConfig:
 
     def is_http(self) -> bool:
         """Check if this is an HTTP-based server."""
-        return self.server_type == "http"
+        return self.server_type in ("http", "sse")
+
+    def is_sse(self) -> bool:
+        """Check if this is a legacy SSE server (not streamable HTTP)."""
+        return self.server_type == "sse"
 
     def get_resolved_env(self) -> dict[str, str]:
         """Resolve environment variables, expanding ${VAR} references."""
