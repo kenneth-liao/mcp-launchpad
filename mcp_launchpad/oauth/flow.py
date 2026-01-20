@@ -46,6 +46,45 @@ class TokenExchangeError(OAuthFlowError):
     pass
 
 
+# OAuth error code to user-friendly message mapping
+# See: https://datatracker.ietf.org/doc/html/rfc6749#section-4.1.2.1
+OAUTH_ERROR_MESSAGES: dict[str, str] = {
+    "invalid_request": "The request is missing a required parameter or is malformed",
+    "invalid_client": "Client authentication failed - check your client_id and client_secret",
+    "invalid_grant": "The authorization code is invalid, expired, or was already used",
+    "unauthorized_client": "This client is not authorized to use this grant type",
+    "unsupported_grant_type": "The authorization server does not support this grant type",
+    "invalid_scope": "The requested scope is invalid, unknown, or exceeds what was granted",
+    "access_denied": "The authorization request was denied by the user or server",
+    "server_error": "The authorization server encountered an unexpected error",
+    "temporarily_unavailable": "The authorization server is temporarily unavailable - try again later",
+}
+
+
+def _format_oauth_error(error_code: str | None, error_description: str | None) -> str:
+    """Format OAuth error with user-friendly explanation.
+
+    Args:
+        error_code: OAuth error code (e.g., 'invalid_grant')
+        error_description: Server-provided error description
+
+    Returns:
+        Formatted error message with explanation
+    """
+    parts = []
+
+    if error_code:
+        parts.append(error_code)
+        # Add user-friendly explanation if we have one
+        if explanation := OAUTH_ERROR_MESSAGES.get(error_code):
+            parts.append(f"({explanation})")
+
+    if error_description:
+        parts.append(f"- {error_description}")
+
+    return " ".join(parts) if parts else "Unknown error"
+
+
 # mcpl client info for Dynamic Client Registration
 MCPL_CLIENT_NAME = "mcpl"
 MCPL_CLIENT_URI = "https://github.com/kenneth-liao/mcp-launchpad"
@@ -102,23 +141,34 @@ async def register_client_dcr(
             error_detail = ""
             try:
                 error_data = response.json()
-                # Only extract safe error fields, not arbitrary response data
-                error_detail = f": {error_data.get('error', '')} - {error_data.get('error_description', '')}"
-            except Exception:
-                # Don't include raw response body - it might contain secrets
+                # Use user-friendly error formatting
+                error_detail = f": {_format_oauth_error(error_data.get('error'), error_data.get('error_description'))}"
+            except (ValueError, TypeError):
+                # JSON decode failed - don't include raw response body (might contain secrets)
+                logger.debug(f"DCR error response was not valid JSON (HTTP {response.status_code})")
                 error_detail = ""
 
             raise ClientRegistrationError(
                 f"Dynamic Client Registration failed (HTTP {response.status_code}){error_detail}"
             )
 
-        data = response.json()
+        # Parse success response
+        try:
+            data = response.json()
+        except (ValueError, TypeError) as e:
+            raise ClientRegistrationError(
+                f"DCR response was not valid JSON: {e}"
+            ) from e
 
-        if "client_id" not in data:
-            raise ClientRegistrationError("DCR response missing client_id")
+        # Validate response contains required fields
+        client_id = data.get("client_id")
+        if not client_id:
+            raise ClientRegistrationError(
+                "DCR response missing or empty client_id"
+            )
 
         return ClientCredentials(
-            client_id=data["client_id"],
+            client_id=client_id,
             client_secret=data.get("client_secret"),
         )
 
@@ -225,17 +275,25 @@ async def exchange_code_for_tokens(
             error_detail = ""
             try:
                 error_data = response.json()
-                # Only extract safe error fields, not arbitrary response data
-                error_detail = f": {error_data.get('error', '')} - {error_data.get('error_description', '')}"
-            except Exception:
-                # Don't include raw response body - it might contain tokens or secrets
+                # Use user-friendly error formatting
+                error_detail = f": {_format_oauth_error(error_data.get('error'), error_data.get('error_description'))}"
+            except (ValueError, TypeError):
+                # JSON decode failed - don't include raw response body (might contain secrets)
+                logger.debug(f"Token exchange error response was not valid JSON (HTTP {response.status_code})")
                 error_detail = ""
 
             raise TokenExchangeError(
                 f"Token exchange failed (HTTP {response.status_code}){error_detail}"
             )
 
-        result: dict[str, Any] = response.json()
+        # Parse success response
+        try:
+            result: dict[str, Any] = response.json()
+        except (ValueError, TypeError) as e:
+            raise TokenExchangeError(
+                f"Token response was not valid JSON: {e}"
+            ) from e
+
         return result
 
     except httpx.RequestError as e:
@@ -290,17 +348,25 @@ async def refresh_token(
             error_detail = ""
             try:
                 error_data = response.json()
-                # Only extract safe error fields, not arbitrary response data
-                error_detail = f": {error_data.get('error', '')} - {error_data.get('error_description', '')}"
-            except Exception:
-                # Don't include raw response body - it might contain tokens or secrets
+                # Use user-friendly error formatting
+                error_detail = f": {_format_oauth_error(error_data.get('error'), error_data.get('error_description'))}"
+            except (ValueError, TypeError):
+                # JSON decode failed - don't include raw response body (might contain secrets)
+                logger.debug(f"Token refresh error response was not valid JSON (HTTP {response.status_code})")
                 error_detail = ""
 
             raise TokenExchangeError(
                 f"Token refresh failed (HTTP {response.status_code}){error_detail}"
             )
 
-        result: dict[str, Any] = response.json()
+        # Parse success response
+        try:
+            result: dict[str, Any] = response.json()
+        except (ValueError, TypeError) as e:
+            raise TokenExchangeError(
+                f"Token refresh response was not valid JSON: {e}"
+            ) from e
+
         return result
 
     except httpx.RequestError as e:
@@ -480,8 +546,16 @@ class OAuthFlow:
         # 2. Check for stored DCR credentials
         stored = self.token_store.get_client(auth_server)
         if stored:
-            self._emit_status("Using stored client credentials")
-            return stored
+            # Only reuse DCR credentials if redirect_uri matches (or wasn't stored)
+            # DCR binds client to specific redirect URIs, mismatches cause token exchange to fail
+            if stored.redirect_uri is None or stored.redirect_uri == redirect_uri:
+                self._emit_status("Using stored client credentials")
+                return stored
+            else:
+                # redirect_uri changed (different port), need fresh DCR
+                logger.debug(
+                    f"Stored redirect_uri mismatch: {stored.redirect_uri} != {redirect_uri}"
+                )
 
         # 3. Try Dynamic Client Registration
         if self._oauth_config.auth_server_metadata.supports_dcr():
@@ -491,6 +565,8 @@ class OAuthFlow:
                     self._oauth_config.auth_server_metadata,
                     redirect_uri,
                 )
+                # Store redirect_uri with credentials for future validation
+                credentials.redirect_uri = redirect_uri
                 # Store for future use
                 self.token_store.set_client(auth_server, credentials)
                 self._emit_status("Client registered successfully")
@@ -565,8 +641,12 @@ class OAuthFlow:
                 self._emit_status(f"Waiting for callback on {redirect_uri}")
 
                 if not webbrowser.open(auth_url):
+                    logger.warning(
+                        "webbrowser.open() returned False - browser may not be available. "
+                        "Check if a default browser is configured or if running in a headless environment."
+                    )
                     self._emit_status(
-                        f"Could not open browser. Please open this URL manually:\n{auth_url}"
+                        f"Could not open browser automatically. Please open this URL manually:\n{auth_url}"
                     )
 
                 # Step 7: Wait for callback
@@ -611,7 +691,9 @@ class OAuthFlow:
                 return token
 
         except (DiscoveryError, CallbackError, TokenExchangeError) as e:
-            raise OAuthFlowError(str(e)) from e
+            # Preserve the original exception type in the message for better debugging
+            error_type = type(e).__name__
+            raise OAuthFlowError(f"{error_type}: {e}") from e
 
     async def refresh_existing(self) -> TokenSet | None:
         """Attempt to refresh an existing token.
@@ -623,18 +705,26 @@ class OAuthFlow:
             await self.discover()
 
         if self._oauth_config is None:
+            logger.debug("Cannot refresh: OAuth configuration not available")
             return None
 
         # Get existing token
         token = self.token_store.get_token(self._oauth_config.resource_uri)
-        if token is None or not token.has_refresh_token():
+        if token is None:
+            logger.debug(f"Cannot refresh: no token stored for {self._oauth_config.resource_uri}")
+            return None
+        if not token.has_refresh_token():
+            logger.debug(f"Cannot refresh: token for {self._oauth_config.resource_uri} has no refresh_token")
             return None
 
         # Get client credentials
         auth_server = self._oauth_config.auth_server_metadata.issuer
         client = self.token_store.get_client(auth_server)
         if client is None:
+            logger.debug(f"Cannot refresh: no client credentials for {auth_server}")
             return None
+
+        logger.info(f"Attempting to refresh token for {self._oauth_config.resource_uri}")
 
         try:
             self._emit_status("Refreshing token...")

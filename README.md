@@ -12,6 +12,13 @@ A lightweight CLI for efficiently discovering and executing tools from multiple 
 - **Cross-Platform** - Works on macOS, Linux, and Windows (experimental)
 - **JSON Mode** - Machine-readable output for scripting and automation
 
+## Table of Contents
+- [Quick Start](#quick-start)
+- [Agent Integration](#agent-integration)
+- [Commands](#commands)
+- [Session Daemon](#session-daemon)
+- [Advanced Configuration](#advanced-configuration)
+
 ## Requirements
 
 - Python 3.13+
@@ -56,39 +63,16 @@ Create `mcp.json` in your project directory (or `~/.claude/mcp.json` for global 
 }
 ```
 
-MCP Launchpad supports two transport types:
-- **stdio** (default): Local process-based servers using `command` and `args`
-- **http**: Remote HTTP/Streamable MCP servers using `url` and optional `headers`
+Configuration files are searched in order: `./mcp.json`, `./.claude/mcp.json`, `~/.claude/mcp.json`.
 
-We use `mcp.json` (not `.mcp.json`) to avoid collision with Claude Code's convention.
+Environment variables use `${VAR}` syntax and are loaded from `~/.claude/.env` and `./.env`. See [Environment Variables](#environment-variables) for details.
 
-Configuration files are searched in this order:
-
-1. `mcp.json` (current directory)
-2. `.claude/mcp.json` (current directory)
-3. `~/.claude/mcp.json` (home directory)
-
-You can validate installation by running `mcpl list`. If you don't see any servers, restart your terminal and run `mcpl list --refresh`.
-
-#### Environment Variables
-
-Environment variables can be specified in the `mcp.json` file using `${VAR}` syntax. The variables will be resolved at runtime.
-
-**Note**: Environment variables must be available at runtime for servers to connect. MCP Launchpad automatically loads `.env` files from these locations (both are loaded, in order):
-
-1. `~/.claude/.env` (global defaults)
-2. `./.env` (project-specific overrides)
-
-This allows you to store API keys globally in `~/.claude/.env` while still supporting project-specific overrides via a local `.env` file.
+Validate installation with `mcpl list`. If you don't see servers, restart your terminal and run `mcpl list --refresh`.
 
 ### 2. Search for tools
 
 ```bash
-# Find tools matching a query
 mcpl search "github issues"
-
-# Get more results
-mcpl search "github issues" --limit 10
 ```
 
 ### 3. Execute a tool
@@ -97,9 +81,9 @@ mcpl search "github issues" --limit 10
 mcpl call github list_issues '{"owner": "anthropics", "repo": "claude-code"}'
 ```
 
-## MCPL with Claude Code
+## Agent Integration
 
-MCP Launchpad integrates with [Claude Code](https://claude.com/claude-code), giving Claude access to all your configured MCP tools via bash. Copy the included `CLAUDE.md` to teach Claude how to use `mcpl`.
+MCP Launchpad works with any AI agent that can run bash commands (Claude Code, Cursor, Windsurf, etc.). Copy the included `CLAUDE.md` to teach your agent how to use `mcpl`.
 
 ### Option 1: Project-Level Setup
 
@@ -121,18 +105,12 @@ curl -o ~/.claude/CLAUDE.md https://raw.githubusercontent.com/kenneth-liao/mcp-l
 
 ### What This Enables
 
-With the `CLAUDE.md` instructions in place, Claude Code can:
+With the instructions in place, your agent can:
 
 - **Search for tools** across all your MCP servers
 - **Execute tools** by calling `mcpl` via bash
 - **Discover capabilities** dynamically as you add new MCP servers
 - **Handle errors** gracefully with built-in troubleshooting guidance
-
-Example interaction with Claude Code:
-```
-You: List my open GitHub issues
-Claude: [searches for github tools, then calls mcpl to list issues]
-```
 
 ## Commands
 
@@ -141,10 +119,8 @@ Claude: [searches for github tools, then calls mcpl to list issues]
 Search for tools across all configured servers. Returns 5 results by default.
 
 ```bash
-mcpl search "sentry errors"           # BM25 search (default)
-mcpl search "list.*" --method regex   # Regex search
-mcpl search "create" --method exact   # Exact substring match
-mcpl search "issues" --limit 10       # Get more results
+mcpl search "sentry errors"
+mcpl search "issues" --limit 10   # Get more results
 ```
 
 ### `mcpl list [server]`
@@ -152,9 +128,8 @@ mcpl search "issues" --limit 10       # Get more results
 List configured servers or tools for a specific server.
 
 ```bash
-mcpl list                # List all servers
-mcpl list github         # List tools for github server
-mcpl list --refresh      # Refresh the tool cache
+mcpl list           # List all servers
+mcpl list github    # List tools for github server
 ```
 
 ### `mcpl call <server> <tool> [arguments]`
@@ -163,13 +138,6 @@ Execute a tool on a server.
 
 ```bash
 mcpl call github list_issues '{"owner": "acme", "repo": "api"}'
-mcpl call filesystem read_file '{"path": "/tmp/test.txt"}'
-
-# Read arguments from stdin for large payloads
-cat args.json | mcpl call github create_issue --stdin
-
-# Bypass daemon for troubleshooting (slower but more reliable)
-mcpl call github list_issues '{}' --no-daemon
 ```
 
 ### `mcpl inspect <server> <tool>`
@@ -177,8 +145,7 @@ mcpl call github list_issues '{}' --no-daemon
 Get the full schema for a specific tool.
 
 ```bash
-mcpl inspect github list_issues
-mcpl inspect github list_issues --example  # Include example call
+mcpl inspect github list_issues --example   # Include example call
 ```
 
 ### `mcpl session status|stop`
@@ -207,9 +174,8 @@ mcpl auth status notion   # Show status for a specific server
 Enable or disable servers without modifying the config file.
 
 ```bash
-mcpl disable slow-server   # Temporarily disable a server
-mcpl enable slow-server    # Re-enable it
-mcpl list                  # Shows disabled status
+mcpl disable slow-server    # Temporarily disable a server
+mcpl enable slow-server     # Re-enable it
 ```
 
 ### `mcpl config`
@@ -217,8 +183,7 @@ mcpl list                  # Shows disabled status
 Show the current configuration and loaded servers.
 
 ```bash
-mcpl config                # Show config summary
-mcpl config --show-secrets # Include environment variable values
+mcpl config
 ```
 
 ### `mcpl verify`
@@ -226,8 +191,7 @@ mcpl config --show-secrets # Include environment variable values
 Test that all configured servers can connect and respond.
 
 ```bash
-mcpl verify             # Test all servers
-mcpl verify --timeout 60  # With custom timeout
+mcpl verify
 ```
 
 ## JSON Mode
@@ -241,15 +205,7 @@ mcpl --json call github list_repos '{}'
 
 ## Session Daemon
 
-MCP Launchpad uses a session daemon to maintain persistent connections to MCP servers. This significantly improves performance when making multiple tool calls.
-
-### How It Works
-
-The daemon:
-- Starts automatically on first `mcpl call`
-- Maintains connections per terminal/IDE session
-- Pre-connects to all configured servers for faster first calls
-- Reconnects automatically if a server connection drops
+MCP Launchpad uses a session daemon to maintain persistent connections to MCP servers, improving performance for repeated calls. The daemon starts automatically on first `mcpl call`.
 
 ### Automatic Cleanup
 
@@ -281,20 +237,7 @@ If you encounter persistent issues, stopping and restarting the daemon usually r
 
 ### HTTP Server Configuration
 
-HTTP/Streamable MCP servers allow you to connect to remote MCP endpoints over HTTP instead of spawning local processes.
-
-#### Basic HTTP Server
-
-```json
-{
-  "mcpServers": {
-    "remote-api": {
-      "type": "http",
-      "url": "https://api.example.com/mcp"
-    }
-  }
-}
-```
+HTTP servers connect to remote MCP endpoints over HTTP (see Quick Start for basic examples).
 
 #### With Authentication Headers
 
@@ -321,10 +264,90 @@ HTTP/Streamable MCP servers allow you to connect to remote MCP endpoints over HT
 | `url` | Yes | Full URL to the MCP endpoint |
 | `headers` | No | HTTP headers to include with requests (supports `${VAR}` syntax) |
 
-**Notes:**
-- Environment variables in `url` and `headers` are resolved using `${VAR}` syntax
-- HTTP servers use the [Streamable HTTP transport](https://modelcontextprotocol.io/docs/concepts/transports#streamable-http) from the MCP specification
-- Connection timeout is controlled by `MCPL_CONNECTION_TIMEOUT` (default: 45 seconds)
+For OAuth-protected servers, see [OAuth Authentication](#oauth-authentication) below.
+
+### OAuth Authentication
+
+Some remote MCP servers (like Notion, Figma, and other cloud services) require OAuth authentication before you can access their tools. MCP Launchpad handles this securely using industry-standard OAuth 2.1 with PKCE.
+
+#### Quick Start
+
+When you try to connect to a server that requires authentication, mcpl will prompt you:
+
+```bash
+$ mcpl list notion --refresh
+Server 'notion' requires OAuth authentication.
+Would you like to authenticate now? [Y/n]
+```
+
+You can also authenticate proactively:
+
+```bash
+mcpl auth login notion
+```
+
+This opens your browser for authorization. After you approve, tokens are stored securely and you can use the server's tools.
+
+#### Commands
+
+**`mcpl auth login <server>`** - Authenticate with an OAuth-protected MCP server.
+
+```bash
+mcpl auth login notion                     # Basic authentication
+mcpl auth login figma --scope "read write" # Request specific scopes
+mcpl auth login custom --force             # Re-authenticate (replace existing tokens)
+```
+
+Options:
+- `--scope TEXT` - Additional OAuth scopes to request
+- `--force` - Force re-authentication even if already logged in
+- `--client-id TEXT` - Use a specific OAuth client ID
+- `--client-secret-stdin` - Read client secret from stdin
+- `--timeout INTEGER` - Browser callback timeout (default: 120 seconds)
+
+**`mcpl auth logout <server>`** - Remove stored authentication tokens.
+
+```bash
+mcpl auth logout notion    # Logout from specific server
+mcpl auth logout --all     # Clear all stored tokens
+```
+
+**`mcpl auth status [server]`** - Check authentication status.
+
+```bash
+mcpl auth status           # Status for all HTTP servers
+mcpl auth status notion    # Detailed status for one server
+```
+
+#### Configuration
+
+For servers that require pre-registered OAuth credentials (instead of Dynamic Client Registration), configure them in your `mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "notion": {
+      "type": "http",
+      "url": "https://mcp.notion.com/mcp",
+      "oauth_client_id": "${NOTION_CLIENT_ID}",
+      "oauth_client_secret": "${NOTION_CLIENT_SECRET}",
+      "oauth_scopes": ["read", "write"]
+    }
+  }
+}
+```
+
+Tokens are encrypted and stored locally in `~/.cache/mcp-launchpad/oauth/` using your system's keyring. Expired tokens are refreshed automatically.
+
+#### Troubleshooting OAuth
+
+| Issue | Solution |
+|-------|----------|
+| "Server requires OAuth authentication" | Run `mcpl auth login <server>` to authenticate |
+| Token expired or auth stops working | Run `mcpl auth login <server> --force` to re-authenticate |
+| Browser doesn't open | Copy the URL printed in the terminal and open it manually |
+| "Invalid client" errors | Check that `oauth_client_id` and `oauth_client_secret` are correct |
+| Keyring warnings | Tokens are using fallback encryption (still secure, but less robust) |
 
 ### OAuth 2.1 Authentication
 
@@ -433,21 +456,6 @@ These settings control daemon behavior in IDE environments (VS Code, Claude Code
 | `MCPL_IDLE_TIMEOUT` | `3600` | Shut down daemon after this many seconds of inactivity (0 to disable) |
 | `MCPL_IDE_ANCHOR_CHECK_INTERVAL` | `10` | How often to check if IDE session is still active (seconds) |
 | `MCPL_SESSION_ID` | (auto) | Override the session ID (for testing or advanced multi-session setups) |
-
-#### Examples
-
-```bash
-# Increase timeout for slow servers
-export MCPL_CONNECTION_TIMEOUT=120
-mcpl call slow-server long_running_tool '{}'
-
-# Disable idle timeout (daemon runs until explicitly stopped)
-export MCPL_IDLE_TIMEOUT=0
-
-# Use a custom session ID for isolated testing
-export MCPL_SESSION_ID=test-session-1
-mcpl call github list_repos '{}'
-```
 
 ## Platform Notes
 

@@ -20,6 +20,7 @@ from mcp.client.streamable_http import streamable_http_client
 from .config import Config, ServerConfig, load_config
 from .connection import OAuthRequiredError
 from .ipc import IPCMessage, create_ipc_server
+from .oauth import get_oauth_manager
 from .platform import (
     IS_WINDOWS,
     get_ide_session_anchor,
@@ -174,6 +175,14 @@ class Daemon:
         url = server_config.get_resolved_url()
         headers = server_config.get_resolved_headers()
 
+        # Inject OAuth token if available and no static Authorization header configured
+        if "Authorization" not in headers:
+            oauth_manager = get_oauth_manager()
+            auth_header = oauth_manager.get_auth_header(url)
+            if auth_header:
+                headers["Authorization"] = auth_header
+                logger.debug(f"Using stored OAuth token for '{server_name}'")
+
         if not url:
             server_state = ServerState(
                 name=server_name,
@@ -205,6 +214,9 @@ class Daemon:
                     # Preflight check: detect OAuth-requiring servers
                     # MCP servers requiring OAuth return 401 with WWW-Authenticate
                     try:
+                        # Note: Don't pass explicit headers here - httpx sets Content-Type
+                        # automatically for json=, and we need to preserve the Authorization
+                        # header from the client's default headers
                         preflight_response = await http_client.post(
                             url,
                             json={
@@ -217,7 +229,6 @@ class Daemon:
                                     "clientInfo": {"name": "mcpl", "version": "0.1.0"},
                                 },
                             },
-                            headers={"Content-Type": "application/json"},
                         )
                         if preflight_response.status_code == 401:
                             www_auth = preflight_response.headers.get("WWW-Authenticate")

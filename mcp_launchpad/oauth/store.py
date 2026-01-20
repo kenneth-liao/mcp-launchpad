@@ -192,7 +192,15 @@ class TokenStore:
 
         except Exception as e:
             # Fallback to derived key if keyring fails
-            logger.warning(f"Keyring not available ({e}), using fallback encryption")
+            error_type = type(e).__name__
+            logger.warning(
+                f"Keyring not available: {error_type}: {e}. "
+                f"Using fallback encryption (machine-derived key). "
+                f"Tokens are still encrypted but with reduced security. "
+                f"To use keyring: ensure a keyring backend is installed "
+                f"(e.g., gnome-keyring on Linux, Keychain on macOS)."
+            )
+            logger.debug(f"Full keyring error: {e!r}")
             fallback_key = _derive_fallback_key()
             self._cipher = Fernet(fallback_key)
             self._using_keyring = False

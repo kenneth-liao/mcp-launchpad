@@ -148,14 +148,24 @@ class ToolCache:
             return self._load_tools()
 
         manager = ConnectionManager(self.config)
-        all_tools: list[ToolInfo] = []
-        server_times: dict[str, str] = {}
         errors: list[str] = []
 
         # Use provided servers list or default to all servers in config
         servers_to_refresh = (
             servers if servers is not None else list(self.config.servers.keys())
         )
+
+        # When refreshing a subset of servers, preserve existing cached tools
+        # for servers NOT in the refresh list
+        if servers is not None:
+            existing_tools = self._load_tools()
+            all_tools = [t for t in existing_tools if t.server not in servers_to_refresh]
+            # Load existing metadata to preserve server_update_times
+            existing_metadata = self._load_metadata()
+            server_times = existing_metadata.server_update_times.copy() if existing_metadata else {}
+        else:
+            all_tools: list[ToolInfo] = []
+            server_times: dict[str, str] = {}
 
         for server_name in servers_to_refresh:
             if on_progress:

@@ -217,6 +217,9 @@ class ConnectionManager:
                 # Preflight check: detect OAuth-requiring servers before full connection
                 # MCP servers requiring OAuth return 401 with WWW-Authenticate header
                 try:
+                    # Note: Don't pass explicit headers here - httpx sets Content-Type
+                    # automatically for json=, and we need to preserve the Authorization
+                    # header from the client's default headers
                     preflight_response = await http_client.post(
                         url,
                         json={
@@ -229,7 +232,6 @@ class ConnectionManager:
                                 "clientInfo": {"name": "mcpl", "version": "0.1.0"},
                             },
                         },
-                        headers={"Content-Type": "application/json"},
                     )
                     if preflight_response.status_code == 401:
                         www_auth = preflight_response.headers.get("WWW-Authenticate")

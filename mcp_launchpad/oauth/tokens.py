@@ -4,9 +4,12 @@ This module provides the TokenSet dataclass for representing OAuth tokens
 with their metadata, including expiry handling and serialization.
 """
 
+import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -48,6 +51,10 @@ class TokenSet:
         if self.expires_at is None:
             # No expiry information - assume token is still valid
             # The server will return 401 if it's actually expired
+            logger.debug(
+                f"Token for {self.resource} has no expires_at - assuming valid. "
+                f"Server will return 401 if token is actually expired."
+            )
             return False
 
         now = datetime.now(timezone.utc)
@@ -57,9 +64,22 @@ class TokenSet:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
 
         # Check if token expires within the buffer period
-        from datetime import timedelta
+        is_expired = now >= (expires_at - timedelta(seconds=buffer_seconds))
 
-        return now >= (expires_at - timedelta(seconds=buffer_seconds))
+        # Log warning if token expired very quickly (possible clock skew)
+        if is_expired and self.issued_at:
+            token_lifetime = (expires_at - self.issued_at).total_seconds()
+            time_since_issue = (now - self.issued_at).total_seconds()
+            # If token "expired" within a very short time after issuance,
+            # there may be clock skew between client and server
+            if time_since_issue < 60 and token_lifetime > 60:
+                logger.warning(
+                    f"Token for {self.resource} appears expired only {time_since_issue:.0f}s "
+                    f"after issuance (lifetime: {token_lifetime:.0f}s). "
+                    f"This may indicate clock skew between client and server."
+                )
+
+        return is_expired
 
     def has_refresh_token(self) -> bool:
         """Check if this token set has a refresh token."""
@@ -142,8 +162,6 @@ class TokenSet:
         # Calculate expiry time from expires_in if provided
         expires_at = None
         if "expires_in" in response:
-            from datetime import timedelta
-
             expires_at = now + timedelta(seconds=int(response["expires_in"]))
 
         return cls(
@@ -162,7 +180,9 @@ class TokenSet:
         Returns:
             Authorization header value (e.g., "Bearer abc123...")
         """
-        return f"{self.token_type} {self.access_token}"
+        # Always use "Bearer" (capital B) per RFC 6750, regardless of
+        # what token_type the OAuth server returned (some return lowercase)
+        return f"Bearer {self.access_token}"
 
 
 @dataclass
@@ -171,10 +191,16 @@ class ClientCredentials:
 
     Stores client_id and optional client_secret for OAuth flows.
     Public clients (like CLIs) may not have a client_secret.
+
+    For DCR-obtained credentials, redirect_uri tracks the URI registered
+    with the authorization server. This is needed because DCR binds the
+    client to specific redirect URIs, and using a different URI will
+    cause token exchange to fail.
     """
 
     client_id: str
     client_secret: str | None = None
+    redirect_uri: str | None = None
 
     def is_confidential(self) -> bool:
         """Check if this is a confidential client (has a secret)."""
@@ -185,6 +211,8 @@ class ClientCredentials:
         data: dict[str, Any] = {"client_id": self.client_id}
         if self.client_secret:
             data["client_secret"] = self.client_secret
+        if self.redirect_uri:
+            data["redirect_uri"] = self.redirect_uri
         return data
 
     @classmethod
@@ -193,4 +221,5 @@ class ClientCredentials:
         return cls(
             client_id=data["client_id"],
             client_secret=data.get("client_secret"),
+            redirect_uri=data.get("redirect_uri"),
         )

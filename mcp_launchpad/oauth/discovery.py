@@ -6,12 +6,28 @@ This module handles:
 - Fetching Authorization Server Metadata (RFC 8414)
 """
 
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
 import httpx
+
+logger = logging.getLogger(__name__)
+
+
+def _http_status_hint(status_code: int) -> str:
+    """Get a user-friendly hint for common HTTP status codes."""
+    hints = {
+        401: "Server requires authentication - you may need to authenticate first",
+        403: "Access forbidden - check if you have permission to access this resource",
+        404: "Endpoint not found - the server may not support OAuth discovery at this URL",
+        500: "Server error - the authorization server may be experiencing issues",
+        502: "Bad gateway - there may be a proxy or network issue",
+        503: "Service unavailable - the server may be temporarily down",
+    }
+    return hints.get(status_code, "")
 
 
 class DiscoveryError(Exception):
@@ -268,22 +284,48 @@ async def fetch_protected_resource_metadata(
     client = http_client or httpx.AsyncClient(timeout=timeout)
     should_close = http_client is None
 
+    logger.debug(f"Fetching protected resource metadata from {url}")
+
     try:
         response = await client.get(url)
 
         if response.status_code != 200:
-            raise DiscoveryError(
+            hint = _http_status_hint(response.status_code)
+            error_msg = (
                 f"Failed to fetch protected resource metadata from {url}: "
                 f"HTTP {response.status_code}"
             )
+            if hint:
+                error_msg += f". {hint}"
+            raise DiscoveryError(error_msg)
 
-        data = response.json()
+        # Parse JSON response
+        try:
+            data = response.json()
+        except (ValueError, TypeError) as e:
+            raise DiscoveryError(
+                f"Protected resource metadata response was not valid JSON: {e}"
+            ) from e
+
+        logger.debug(f"Successfully fetched protected resource metadata from {url}")
         return ProtectedResourceMetadata.from_dict(data, url)
 
+    except httpx.ConnectError as e:
+        raise DiscoveryError(
+            f"Could not connect to {url}: {e}. "
+            f"Check that the URL is correct and the server is reachable."
+        ) from e
+    except httpx.TimeoutException as e:
+        raise DiscoveryError(
+            f"Timeout fetching resource metadata from {url}: {e}. "
+            f"The server may be slow or unresponsive."
+        ) from e
     except httpx.RequestError as e:
         raise DiscoveryError(f"Network error fetching resource metadata: {e}") from e
-    except (ValueError, KeyError) as e:
-        raise DiscoveryError(f"Invalid resource metadata response: {e}") from e
+    except KeyError as e:
+        raise DiscoveryError(
+            f"Protected resource metadata missing required field: {e}"
+        ) from e
     finally:
         if should_close:
             await client.aclose()
@@ -324,24 +366,46 @@ async def fetch_auth_server_metadata(
         urljoin(base_url, "/.well-known/openid-configuration"),
     ]
 
-    last_error: Exception | None = None
+    errors: list[tuple[str, str]] = []  # (endpoint, error_message)
 
     try:
         for endpoint in endpoints:
+            logger.debug(f"Trying auth server metadata endpoint: {endpoint}")
             try:
                 response = await client.get(endpoint)
 
                 if response.status_code == 200:
-                    data = response.json()
+                    try:
+                        data = response.json()
+                    except (ValueError, TypeError) as e:
+                        errors.append((endpoint, f"Invalid JSON response: {e}"))
+                        continue
+
+                    logger.debug(f"Successfully fetched auth server metadata from {endpoint}")
                     return AuthServerMetadata.from_dict(data)
+                else:
+                    hint = _http_status_hint(response.status_code)
+                    error_msg = f"HTTP {response.status_code}"
+                    if hint:
+                        error_msg += f" ({hint})"
+                    errors.append((endpoint, error_msg))
 
-            except (httpx.RequestError, ValueError, KeyError) as e:
-                last_error = e
-                continue
+            except httpx.ConnectError as e:
+                errors.append((endpoint, f"Connection failed: {e}"))
+            except httpx.TimeoutException as e:
+                errors.append((endpoint, f"Timeout: {e}"))
+            except httpx.RequestError as e:
+                errors.append((endpoint, f"Network error: {e}"))
+            except KeyError as e:
+                errors.append((endpoint, f"Missing required field: {e}"))
 
+        # Build detailed error message
+        error_details = "\n".join(f"  - {ep}: {err}" for ep, err in errors)
         raise DiscoveryError(
-            f"Failed to fetch auth server metadata from {issuer}. "
-            f"Tried: {', '.join(endpoints)}. Last error: {last_error}"
+            f"Failed to fetch auth server metadata from {issuer}.\n"
+            f"Tried the following endpoints:\n{error_details}\n\n"
+            f"The server may not support OAuth 2.0/OIDC discovery, "
+            f"or the URL may be incorrect."
         )
 
     finally:
@@ -392,7 +456,9 @@ async def discover_oauth_config(
         # Step 2: Validate we have at least one auth server
         if not resource_metadata.authorization_servers:
             raise DiscoveryError(
-                f"Resource metadata for {server_url} does not specify any authorization servers"
+                f"Resource metadata for {server_url} does not specify any authorization servers. "
+                f"The server's /.well-known/oauth-protected-resource must include "
+                f"an 'authorization_servers' field."
             )
 
         # Step 3: Fetch auth server metadata (use first auth server)
@@ -408,8 +474,11 @@ async def discover_oauth_config(
                 f"which is required by the MCP specification"
             )
 
-        # Step 5: Compute resource URI
-        resource_uri = compute_resource_uri(server_url)
+        # Step 5: Get resource URI from Protected Resource Metadata (RFC 9728)
+        # The resource metadata's "resource" field is authoritative - it tells us
+        # what resource identifier to use for RFC 8707 resource indicators.
+        # Only fall back to computing from URL if metadata doesn't specify it.
+        resource_uri = resource_metadata.resource or compute_resource_uri(server_url)
 
         return OAuthConfig(
             resource_metadata=resource_metadata,
