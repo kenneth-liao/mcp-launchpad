@@ -10,11 +10,42 @@ import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+
+def construct_well_known_uri(base_url: str, well_known_suffix: str) -> str:
+    """Construct a well-known URI per RFC 8414 Section 3.
+
+    Per RFC 8414, if the URL contains a path component, the well-known suffix
+    is inserted between the host and the path:
+        scheme://netloc/.well-known/{suffix}{path}
+
+    Examples:
+        - https://example.com + oauth-authorization-server
+          -> https://example.com/.well-known/oauth-authorization-server
+        - https://example.com/mcp + oauth-authorization-server
+          -> https://example.com/.well-known/oauth-authorization-server/mcp
+
+    Args:
+        base_url: The base URL (e.g., server URL or issuer URL)
+        well_known_suffix: The well-known suffix (e.g., "oauth-authorization-server")
+
+    Returns:
+        The constructed well-known URI
+    """
+    parsed = urlparse(base_url)
+    path = parsed.path.rstrip("/")
+
+    if path:
+        well_known_path = f"/.well-known/{well_known_suffix}{path}"
+    else:
+        well_known_path = f"/.well-known/{well_known_suffix}"
+
+    return f"{parsed.scheme}://{parsed.netloc}{well_known_path}"
 
 
 def _http_status_hint(status_code: int) -> str:
@@ -272,11 +303,9 @@ async def fetch_protected_resource_metadata(
     Raises:
         DiscoveryError: If metadata cannot be fetched or parsed, or URL is not HTTPS
     """
-    # If URL doesn't contain well-known path, construct it
+    # If URL doesn't contain well-known path, construct it per RFC 8414 Section 3
     if "/.well-known/oauth-protected-resource" not in url:
-        parsed = urlparse(url)
-        base_url = f"{parsed.scheme}://{parsed.netloc}"
-        url = urljoin(base_url, "/.well-known/oauth-protected-resource")
+        url = construct_well_known_uri(url, "oauth-protected-resource")
 
     # Validate HTTPS for security
     _require_https(url, "Protected resource metadata URL")
@@ -357,13 +386,10 @@ async def fetch_auth_server_metadata(
     client = http_client or httpx.AsyncClient(timeout=timeout)
     should_close = http_client is None
 
-    # Try OAuth 2.0 metadata endpoint first, then OIDC
-    parsed = urlparse(issuer)
-    base_url = f"{parsed.scheme}://{parsed.netloc}"
-
+    # Try OAuth 2.0 metadata endpoint first, then OIDC (per RFC 8414 Section 3)
     endpoints = [
-        urljoin(base_url, "/.well-known/oauth-authorization-server"),
-        urljoin(base_url, "/.well-known/openid-configuration"),
+        construct_well_known_uri(issuer, "oauth-authorization-server"),
+        construct_well_known_uri(issuer, "openid-configuration"),
     ]
 
     errors: list[tuple[str, str]] = []  # (endpoint, error_message)
