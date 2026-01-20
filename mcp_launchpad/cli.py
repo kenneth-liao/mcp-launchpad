@@ -280,7 +280,7 @@ def _resolve_config_reference(ref: str, discovered: list[Path]) -> Path | None:
     return None
 
 
-def _restart_daemon_for_config_change(ctx: click.Context, output: OutputHandler) -> None:
+def _restart_daemon_for_config_change(ctx: click.Context) -> None:
     """Restart the daemon to pick up config changes."""
     config = get_config(ctx)
     session_client = SessionClient(config)
@@ -1713,7 +1713,7 @@ def config_files(
     if activate_all:
         prefs_manager.set_active_configs(discovered)
         prefs_manager.mark_first_run_completed()
-        _restart_daemon_for_config_change(ctx, output)
+        _restart_daemon_for_config_change(ctx)
         if not ctx.obj["json_mode"]:
             click.secho(f"Activated all {len(discovered)} config file(s).", fg="green")
         else:
@@ -1737,7 +1737,7 @@ def config_files(
         changed = prefs_manager.activate(resolved)
         prefs_manager.mark_first_run_completed()
         if changed:
-            _restart_daemon_for_config_change(ctx, output)
+            _restart_daemon_for_config_change(ctx)
 
         if not ctx.obj["json_mode"]:
             display_path = str(resolved).replace(str(Path.home()), "~")
@@ -1765,7 +1765,7 @@ def config_files(
 
         changed = prefs_manager.deactivate(resolved)
         if changed:
-            _restart_daemon_for_config_change(ctx, output)
+            _restart_daemon_for_config_change(ctx)
 
         if not ctx.obj["json_mode"]:
             display_path = str(resolved).replace(str(Path.home()), "~")
@@ -1794,7 +1794,7 @@ def config_files(
         if selected:
             prefs_manager.set_active_configs(selected)
             prefs_manager.mark_first_run_completed()
-            _restart_daemon_for_config_change(ctx, output)
+            _restart_daemon_for_config_change(ctx)
             click.echo()
             click.secho(f"Activated {len(selected)} config file(s).", fg="green")
         else:
