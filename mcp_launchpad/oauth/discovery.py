@@ -17,35 +17,45 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
-def construct_well_known_uri(base_url: str, well_known_suffix: str) -> str:
-    """Construct a well-known URI per RFC 8414 Section 3.
+def construct_well_known_uris(base_url: str, well_known_suffix: str) -> list[str]:
+    """Construct well-known URIs to try for OAuth discovery.
 
-    Per RFC 8414, if the URL contains a path component, the well-known suffix
-    is inserted between the host and the path:
+    Returns a list of URLs to try in order:
+    1. RFC 8414 Section 3 compliant: path moved after well-known suffix
+    2. Non-compliant fallback: well-known at root (for servers like Linear)
+
+    Per RFC 8414 Section 3, if the URL contains a path component, the well-known
+    suffix should be inserted between the host and the path:
         scheme://netloc/.well-known/{suffix}{path}
 
-    Examples:
-        - https://example.com + oauth-authorization-server
-          -> https://example.com/.well-known/oauth-authorization-server
-        - https://example.com/mcp + oauth-authorization-server
-          -> https://example.com/.well-known/oauth-authorization-server/mcp
+    However, some servers (e.g., Linear) don't follow this and put the well-known
+    endpoint at the root regardless of the URL path. We try RFC 8414 compliant
+    first, then fall back to the non-compliant pattern.
+
+    Examples for https://example.com/mcp + oauth-authorization-server:
+        1. https://example.com/.well-known/oauth-authorization-server/mcp (RFC 8414)
+        2. https://example.com/.well-known/oauth-authorization-server (fallback)
 
     Args:
         base_url: The base URL (e.g., server URL or issuer URL)
         well_known_suffix: The well-known suffix (e.g., "oauth-authorization-server")
 
     Returns:
-        The constructed well-known URI
+        List of well-known URIs to try in order
     """
     parsed = urlparse(base_url)
     path = parsed.path.rstrip("/")
+    base = f"{parsed.scheme}://{parsed.netloc}"
 
     if path:
-        well_known_path = f"/.well-known/{well_known_suffix}{path}"
+        # URL has a path - return RFC 8414 compliant first, then fallback
+        return [
+            f"{base}/.well-known/{well_known_suffix}{path}",  # RFC 8414 compliant
+            f"{base}/.well-known/{well_known_suffix}",  # Fallback for non-compliant servers
+        ]
     else:
-        well_known_path = f"/.well-known/{well_known_suffix}"
-
-    return f"{parsed.scheme}://{parsed.netloc}{well_known_path}"
+        # No path - only one URL needed
+        return [f"{base}/.well-known/{well_known_suffix}"]
 
 
 def _http_status_hint(status_code: int) -> str:
@@ -291,6 +301,9 @@ async def fetch_protected_resource_metadata(
 ) -> ProtectedResourceMetadata:
     """Fetch Protected Resource Metadata from an MCP server.
 
+    Tries RFC 8414 compliant URL first, then falls back to non-compliant
+    patterns for servers that don't follow the spec.
+
     Args:
         url: The resource_metadata URL from WWW-Authenticate header,
              OR the MCP server base URL (will append well-known path)
@@ -303,58 +316,61 @@ async def fetch_protected_resource_metadata(
     Raises:
         DiscoveryError: If metadata cannot be fetched or parsed, or URL is not HTTPS
     """
-    # If URL doesn't contain well-known path, construct it per RFC 8414 Section 3
-    if "/.well-known/oauth-protected-resource" not in url:
-        url = construct_well_known_uri(url, "oauth-protected-resource")
+    # If URL already contains well-known path, use it directly
+    if "/.well-known/oauth-protected-resource" in url:
+        urls_to_try = [url]
+    else:
+        urls_to_try = construct_well_known_uris(url, "oauth-protected-resource")
 
-    # Validate HTTPS for security
-    _require_https(url, "Protected resource metadata URL")
+    # Validate HTTPS for all URLs
+    for u in urls_to_try:
+        _require_https(u, "Protected resource metadata URL")
 
     client = http_client or httpx.AsyncClient(timeout=timeout)
     should_close = http_client is None
 
-    logger.debug(f"Fetching protected resource metadata from {url}")
+    errors: list[tuple[str, str]] = []
 
     try:
-        response = await client.get(url)
+        for endpoint in urls_to_try:
+            logger.debug(f"Trying protected resource metadata endpoint: {endpoint}")
+            try:
+                response = await client.get(endpoint)
 
-        if response.status_code != 200:
-            hint = _http_status_hint(response.status_code)
-            error_msg = (
-                f"Failed to fetch protected resource metadata from {url}: "
-                f"HTTP {response.status_code}"
-            )
-            if hint:
-                error_msg += f". {hint}"
-            raise DiscoveryError(error_msg)
+                if response.status_code == 200:
+                    try:
+                        data = response.json()
+                    except (ValueError, TypeError) as e:
+                        errors.append((endpoint, f"Invalid JSON response: {e}"))
+                        continue
 
-        # Parse JSON response
-        try:
-            data = response.json()
-        except (ValueError, TypeError) as e:
-            raise DiscoveryError(
-                f"Protected resource metadata response was not valid JSON: {e}"
-            ) from e
+                    logger.debug(
+                        f"Successfully fetched protected resource metadata from {endpoint}"
+                    )
+                    return ProtectedResourceMetadata.from_dict(data, endpoint)
+                else:
+                    hint = _http_status_hint(response.status_code)
+                    error_msg = f"HTTP {response.status_code}"
+                    if hint:
+                        error_msg += f" ({hint})"
+                    errors.append((endpoint, error_msg))
 
-        logger.debug(f"Successfully fetched protected resource metadata from {url}")
-        return ProtectedResourceMetadata.from_dict(data, url)
+            except httpx.ConnectError as e:
+                errors.append((endpoint, f"Connection failed: {e}"))
+            except httpx.TimeoutException as e:
+                errors.append((endpoint, f"Timeout: {e}"))
+            except httpx.RequestError as e:
+                errors.append((endpoint, f"Network error: {e}"))
+            except KeyError as e:
+                errors.append((endpoint, f"Missing required field: {e}"))
 
-    except httpx.ConnectError as e:
+        # All URLs failed - build detailed error message
+        error_details = "\n".join(f"  - {ep}: {err}" for ep, err in errors)
         raise DiscoveryError(
-            f"Could not connect to {url}: {e}. "
-            f"Check that the URL is correct and the server is reachable."
-        ) from e
-    except httpx.TimeoutException as e:
-        raise DiscoveryError(
-            f"Timeout fetching resource metadata from {url}: {e}. "
-            f"The server may be slow or unresponsive."
-        ) from e
-    except httpx.RequestError as e:
-        raise DiscoveryError(f"Network error fetching resource metadata: {e}") from e
-    except KeyError as e:
-        raise DiscoveryError(
-            f"Protected resource metadata missing required field: {e}"
-        ) from e
+            f"Failed to fetch protected resource metadata from {url}.\n"
+            f"Tried the following endpoints:\n{error_details}"
+        )
+
     finally:
         if should_close:
             await client.aclose()
@@ -367,7 +383,8 @@ async def fetch_auth_server_metadata(
 ) -> AuthServerMetadata:
     """Fetch Authorization Server Metadata per RFC 8414.
 
-    Tries both OAuth 2.0 and OIDC discovery endpoints.
+    Tries OAuth 2.0 and OIDC discovery endpoints with both RFC 8414 compliant
+    and non-compliant URL patterns for maximum compatibility.
 
     Args:
         issuer: The authorization server issuer URL
@@ -386,11 +403,19 @@ async def fetch_auth_server_metadata(
     client = http_client or httpx.AsyncClient(timeout=timeout)
     should_close = http_client is None
 
-    # Try OAuth 2.0 metadata endpoint first, then OIDC (per RFC 8414 Section 3)
-    endpoints = [
-        construct_well_known_uri(issuer, "oauth-authorization-server"),
-        construct_well_known_uri(issuer, "openid-configuration"),
-    ]
+    # Build list of endpoints to try:
+    # For each suffix, try RFC 8414 compliant URL first, then fallback
+    oauth_urls = construct_well_known_uris(issuer, "oauth-authorization-server")
+    oidc_urls = construct_well_known_uris(issuer, "openid-configuration")
+
+    # Interleave: try oauth first URL, oidc first URL, then fallbacks
+    # This prioritizes the most likely endpoints while still trying all options
+    endpoints: list[str] = []
+    for i in range(max(len(oauth_urls), len(oidc_urls))):
+        if i < len(oauth_urls):
+            endpoints.append(oauth_urls[i])
+        if i < len(oidc_urls):
+            endpoints.append(oidc_urls[i])
 
     errors: list[tuple[str, str]] = []  # (endpoint, error_message)
 

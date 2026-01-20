@@ -10,7 +10,7 @@ from mcp_launchpad.oauth.discovery import (
     OAuthConfig,
     ProtectedResourceMetadata,
     compute_resource_uri,
-    construct_well_known_uri,
+    construct_well_known_uris,
     discover_oauth_config,
     get_resource_metadata_url,
     parse_www_authenticate,
@@ -93,70 +93,101 @@ class TestComputeResourceUri:
         assert compute_resource_uri("https://api.example.com:8443/mcp") == "https://api.example.com:8443/mcp"
 
 
-class TestConstructWellKnownUri:
-    """Tests for construct_well_known_uri per RFC 8414 Section 3."""
+class TestConstructWellKnownUris:
+    """Tests for construct_well_known_uris per RFC 8414 Section 3 with fallback."""
 
-    def test_url_without_path(self):
-        """Test well-known URL construction for URL without path."""
-        # Standard case - no path component
-        result = construct_well_known_uri(
+    def test_url_without_path_returns_single_url(self):
+        """Test that URLs without path return a single URL (no fallback needed)."""
+        result = construct_well_known_uris(
             "https://auth.example.com", "oauth-authorization-server"
         )
-        assert result == "https://auth.example.com/.well-known/oauth-authorization-server"
+        assert result == ["https://auth.example.com/.well-known/oauth-authorization-server"]
+        assert len(result) == 1
 
-    def test_url_with_single_segment_path(self):
-        """Test well-known URL construction for URL with single-segment path.
+    def test_url_with_path_returns_two_urls(self):
+        """Test that URLs with path return RFC 8414 compliant + fallback.
 
-        This is the Supabase case: https://mcp.supabase.com/mcp
-        Per RFC 8414 Section 3, the path goes AFTER the well-known suffix.
+        This handles both:
+        - Supabase (RFC 8414 compliant): uses /.well-known/.../mcp
+        - Linear (non-compliant): uses /.well-known/... without path
         """
-        result = construct_well_known_uri(
+        result = construct_well_known_uris(
             "https://mcp.supabase.com/mcp", "oauth-authorization-server"
         )
-        assert result == "https://mcp.supabase.com/.well-known/oauth-authorization-server/mcp"
+        assert len(result) == 2
+        # First: RFC 8414 compliant (path after suffix)
+        assert result[0] == "https://mcp.supabase.com/.well-known/oauth-authorization-server/mcp"
+        # Second: Fallback (no path, for non-compliant servers like Linear)
+        assert result[1] == "https://mcp.supabase.com/.well-known/oauth-authorization-server"
 
     def test_url_with_nested_path(self):
         """Test well-known URL construction for URL with nested path."""
-        result = construct_well_known_uri(
+        result = construct_well_known_uris(
             "https://api.example.com/tenant/v1", "oauth-authorization-server"
         )
-        assert result == "https://api.example.com/.well-known/oauth-authorization-server/tenant/v1"
+        assert len(result) == 2
+        assert result[0] == "https://api.example.com/.well-known/oauth-authorization-server/tenant/v1"
+        assert result[1] == "https://api.example.com/.well-known/oauth-authorization-server"
 
     def test_url_with_trailing_slash(self):
         """Test that trailing slash is stripped before constructing URL."""
-        result = construct_well_known_uri(
+        result = construct_well_known_uris(
             "https://mcp.supabase.com/mcp/", "oauth-authorization-server"
         )
-        assert result == "https://mcp.supabase.com/.well-known/oauth-authorization-server/mcp"
+        assert len(result) == 2
+        assert result[0] == "https://mcp.supabase.com/.well-known/oauth-authorization-server/mcp"
+        assert result[1] == "https://mcp.supabase.com/.well-known/oauth-authorization-server"
 
     def test_url_with_port(self):
         """Test well-known URL construction preserves port."""
-        result = construct_well_known_uri(
+        result = construct_well_known_uris(
             "https://api.example.com:8443/mcp", "oauth-authorization-server"
         )
-        assert result == "https://api.example.com:8443/.well-known/oauth-authorization-server/mcp"
+        assert len(result) == 2
+        assert result[0] == "https://api.example.com:8443/.well-known/oauth-authorization-server/mcp"
+        assert result[1] == "https://api.example.com:8443/.well-known/oauth-authorization-server"
 
     def test_openid_configuration_suffix(self):
         """Test with openid-configuration suffix."""
-        result = construct_well_known_uri(
+        result = construct_well_known_uris(
             "https://auth.example.com/tenant", "openid-configuration"
         )
-        assert result == "https://auth.example.com/.well-known/openid-configuration/tenant"
+        assert len(result) == 2
+        assert result[0] == "https://auth.example.com/.well-known/openid-configuration/tenant"
+        assert result[1] == "https://auth.example.com/.well-known/openid-configuration"
 
     def test_oauth_protected_resource_suffix(self):
         """Test with oauth-protected-resource suffix."""
-        result = construct_well_known_uri(
+        result = construct_well_known_uris(
             "https://api.example.com/mcp", "oauth-protected-resource"
         )
-        assert result == "https://api.example.com/.well-known/oauth-protected-resource/mcp"
+        assert len(result) == 2
+        assert result[0] == "https://api.example.com/.well-known/oauth-protected-resource/mcp"
+        assert result[1] == "https://api.example.com/.well-known/oauth-protected-resource"
 
-    def test_backwards_compatibility_no_path(self):
-        """Test that URLs without paths work the same as before (Linear case)."""
-        # Linear: https://mcp.linear.app (no path)
-        result = construct_well_known_uri(
+    def test_linear_case_no_path(self):
+        """Test Linear case: URL without path returns single URL."""
+        # Linear's actual URL is https://mcp.linear.app (no /mcp path in their config)
+        # But their config has /mcp, so we test both scenarios
+        result = construct_well_known_uris(
             "https://mcp.linear.app", "oauth-authorization-server"
         )
-        assert result == "https://mcp.linear.app/.well-known/oauth-authorization-server"
+        assert result == ["https://mcp.linear.app/.well-known/oauth-authorization-server"]
+
+    def test_linear_with_mcp_path_fallback(self):
+        """Test Linear case: URL with /mcp path tries both, fallback works.
+
+        Linear's MCP config uses https://mcp.linear.app/mcp but their well-known
+        endpoint is at the root. The fallback URL should work.
+        """
+        result = construct_well_known_uris(
+            "https://mcp.linear.app/mcp", "oauth-authorization-server"
+        )
+        assert len(result) == 2
+        # First try (RFC 8414 compliant) - will 404 on Linear
+        assert result[0] == "https://mcp.linear.app/.well-known/oauth-authorization-server/mcp"
+        # Fallback (non-compliant) - works on Linear
+        assert result[1] == "https://mcp.linear.app/.well-known/oauth-authorization-server"
 
 
 class TestProtectedResourceMetadata:
