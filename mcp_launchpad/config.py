@@ -58,6 +58,8 @@ class ServerConfig:
     oauth_client_id: str | None = None
     oauth_client_secret: str | None = None
     oauth_scopes: list[str] = field(default_factory=list)
+    # Static API key (alternative to OAuth for agent-friendly auth)
+    api_key: str | None = None
 
     def is_http(self) -> bool:
         """Check if this is an HTTP-based server."""
@@ -94,6 +96,12 @@ class ServerConfig:
         if self.oauth_client_secret is None:
             return None
         return _resolve_env_vars(self.oauth_client_secret)
+
+    def get_resolved_api_key(self) -> str | None:
+        """Resolve environment variables in API key."""
+        if self.api_key is None:
+            return None
+        return _resolve_env_vars(self.api_key)
 
 
 @dataclass
@@ -285,6 +293,8 @@ def parse_server_config(name: str, data: dict[str, Any]) -> ServerConfig:
         oauth_client_id=data.get("oauth_client_id"),
         oauth_client_secret=data.get("oauth_client_secret"),
         oauth_scopes=data.get("oauth_scopes", []),
+        # Static API key (alternative to OAuth)
+        api_key=data.get("api_key"),
     )
 
 

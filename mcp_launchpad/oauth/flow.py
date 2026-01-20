@@ -212,11 +212,23 @@ def build_authorization_url(
         "resource": resource,
     }
 
+    # Determine base scopes
     if scopes:
-        params["scope"] = " ".join(scopes)
+        requested_scopes = list(scopes)
     elif auth_server_metadata.scopes_supported:
-        # Use default scopes if server specifies them
-        params["scope"] = " ".join(auth_server_metadata.scopes_supported)
+        requested_scopes = list(auth_server_metadata.scopes_supported)
+    else:
+        requested_scopes = []
+
+    # Add offline_access for long-lived refresh tokens (enables agent use)
+    # Only add if: server supports it OR server doesn't advertise scopes (unknown scopes ignored per spec)
+    if "offline_access" not in requested_scopes:
+        server_scopes = auth_server_metadata.scopes_supported
+        if server_scopes is None or "offline_access" in server_scopes:
+            requested_scopes.append("offline_access")
+
+    if requested_scopes:
+        params["scope"] = " ".join(requested_scopes)
 
     auth_url = auth_server_metadata.authorization_endpoint
     return f"{auth_url}?{urlencode(params)}"

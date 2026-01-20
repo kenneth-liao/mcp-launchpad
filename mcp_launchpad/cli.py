@@ -1320,23 +1320,40 @@ def auth_status(ctx: click.Context, server: str | None) -> None:
             if status.authenticated:
                 if status.expired:
                     click.secho("  Status: ", nl=False)
-                    click.secho("expired", fg="yellow")
+                    click.secho("Expired", fg="yellow")
                 else:
                     click.secho("  Status: ", nl=False)
-                    click.secho("authenticated", fg="green")
+                    click.secho("Authenticated ✓", fg="green")
 
-                if status.expires_at:
-                    click.echo(f"  Expires: {status.expires_at}")
+                # Show access token expiry with human-readable time
+                if status.expires_in_human:
+                    expiry_color = "yellow" if status.expired else "green"
+                    click.echo("  Access Token: ", nl=False)
+                    click.secho(f"Expires in {status.expires_in_human}", fg=expiry_color)
+                elif status.expires_at:
+                    click.echo(f"  Access Token: Expires at {status.expires_at}")
+
+                # Show refresh token status with helpful message
+                if status.has_refresh_token:
+                    click.echo("  Refresh Token: ", nl=False)
+                    click.secho("Yes (auto-refresh enabled)", fg="green")
+                else:
+                    click.echo("  Refresh Token: ", nl=False)
+                    click.secho("No (re-auth required on expiry)", fg="yellow")
+
                 if status.scope:
                     click.echo(f"  Scopes: {status.scope}")
-                click.echo(f"  Has refresh token: {status.has_refresh_token}")
+
+                # Show when token was issued
+                if status.issued_ago_human:
+                    click.echo(f"  Issued: {status.issued_ago_human}")
 
                 if status.expired:
                     click.echo()
                     click.secho(f"  Run: mcpl auth login {server}", fg="cyan")
             else:
                 click.secho("  Status: ", nl=False)
-                click.secho("not authenticated", fg="red")
+                click.secho("Not authenticated", fg="red")
                 click.echo()
                 click.secho(f"  Run: mcpl auth login {server}", fg="cyan")
 

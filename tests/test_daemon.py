@@ -565,8 +565,8 @@ class TestDaemonOAuthHandling:
 
             # Should tell user how to authenticate
             assert "mcpl auth login" in error_msg
-            # Should suggest static headers as alternative
-            assert "headers" in error_msg
+            # Should suggest API key as alternative
+            assert "api_key" in error_msg
 
     @pytest.mark.asyncio
     async def test_non_401_http_error_still_retries(self, http_server_config):
