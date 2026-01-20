@@ -62,6 +62,8 @@ mcpl auth login <server>    # Authenticate with OAuth-protected server
 - **Timeout errors**: Server may be slow; increase with `MCPL_CONNECTION_TIMEOUT=120`
 - **OAuth authentication required**: Run `mcpl auth login <server>` to authenticate
 - **Token expired**: Run `mcpl auth login <server> --force` to re-authenticate
+- **Multiple configs found**: Run `mcpl config files --select` to choose which to use
+- **Wrong config active**: Run `mcpl config files` to see status and adjust
 
 ## Quick Reference
 
@@ -85,4 +87,8 @@ mcpl call <server> <tool> '{"param": "value"}'        # With arguments
 
 # Verify servers
 mcpl verify                              # Test all servers are working
+
+# Config management (when multiple configs exist)
+mcpl config files                        # View active/inactive configs
+mcpl config files --select               # Interactive selection
 ```
