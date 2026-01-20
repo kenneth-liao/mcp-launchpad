@@ -318,9 +318,10 @@ class TestOAuthRequiredError:
         message = str(error)
         # Should mention how to authenticate
         assert "mcpl auth login" in message
-        # Should mention alternative options
-        assert "headers" in message
-        assert "Bearer" in message
+        # Should mention alternative option (API key)
+        assert "api_key" in message
+        # Should mention agent/automated use
+        assert "agent" in message.lower() or "automated" in message.lower()
 
     def test_error_stores_attributes(self):
         """Test that error stores server_name, url, and www_authenticate."""
@@ -330,11 +331,14 @@ class TestOAuthRequiredError:
         assert error.url == "https://api.notion.com/mcp"
         assert error.www_authenticate == www_auth
 
-    def test_error_message_includes_github_issue_link(self):
-        """Test that error message includes the GitHub issue link for tracking."""
+    def test_error_message_includes_auth_status_hint(self):
+        """Test that error message includes auth status hint for troubleshooting."""
         error = OAuthRequiredError("notion", "https://api.notion.com/mcp")
-        assert "github.com" in str(error)
-        assert "issues/7" in str(error)
+        message = str(error)
+        # Should mention how to check auth status
+        assert "mcpl auth status" in message
+        # Should mention tokens persist across sessions
+        assert "persist" in message.lower() or "Tokens" in message
 
 
 class TestConnectionManagerOAuth:

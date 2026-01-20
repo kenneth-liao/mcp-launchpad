@@ -37,13 +37,14 @@ class OAuthRequiredError(Exception):
 
         message = (
             f"Server '{server_name}' requires OAuth authentication.\n\n"
-            f"To authenticate, run:\n"
-            f"  mcpl auth login {server_name}\n\n"
-            f"This will open a browser for authorization.\n\n"
-            f"Alternatively:\n"
-            f"- If the server supports static API keys, configure headers:\n"
-            f'  Add to config: "headers": {{"Authorization": "Bearer ${{TOKEN}}"}}\n\n'
-            f"See: https://github.com/kenneth-liao/mcp-launchpad/issues/7"
+            f"For agent/automated use:\n"
+            f"  1. Authenticate first (run manually before agent session):\n"
+            f"     mcpl auth login {server_name}\n\n"
+            f"  2. Or configure a static API key in your config:\n"
+            f'     "api_key": "${{YOUR_API_KEY}}"\n\n'
+            f"  3. Check auth status: mcpl auth status {server_name}\n\n"
+            f"Tokens persist across sessions. After authenticating once,\n"
+            f"agents can use mcpl until tokens expire (typically weeks/months)."
         )
         super().__init__(message)
 
@@ -189,13 +190,19 @@ class ConnectionManager:
         url = server_config.get_resolved_url()
         headers = server_config.get_resolved_headers()
 
-        # Inject OAuth token if available and no Authorization header configured
+        # Inject API key or OAuth token if available and no Authorization header configured
         if "Authorization" not in headers:
-            oauth_manager = get_oauth_manager()
-            auth_header = oauth_manager.get_auth_header(url)
-            if auth_header:
-                headers["Authorization"] = auth_header
-                logger.debug(f"Using stored OAuth token for '{server_name}'")
+            # Priority: 1) Static API key, 2) OAuth token
+            api_key = server_config.get_resolved_api_key()
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+                logger.debug(f"Using static API key for '{server_name}'")
+            else:
+                oauth_manager = get_oauth_manager()
+                auth_header = oauth_manager.get_auth_header(url)
+                if auth_header:
+                    headers["Authorization"] = auth_header
+                    logger.debug(f"Using stored OAuth token for '{server_name}'")
 
         logger.debug(f"Connecting to HTTP server '{server_name}' at {url}")
 

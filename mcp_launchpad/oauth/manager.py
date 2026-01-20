@@ -7,6 +7,7 @@ both the CLI and daemon to manage authentication for MCP servers.
 import logging
 import threading
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 from urllib.parse import urlparse
 
@@ -16,6 +17,68 @@ from .store import TokenDecryptionError, TokenStore
 from .tokens import TokenSet
 
 logger = logging.getLogger(__name__)
+
+
+def _format_timedelta(td: timedelta) -> str:
+    """Format a timedelta into a human-readable string.
+
+    Examples:
+        - "45 minutes"
+        - "2 hours"
+        - "3 days"
+        - "2 weeks"
+
+    Args:
+        td: The timedelta to format
+
+    Returns:
+        Human-readable string representation
+    """
+    total_seconds = int(td.total_seconds())
+
+    if total_seconds < 0:
+        return "Expired"
+
+    if total_seconds < 60:
+        return f"{total_seconds} seconds"
+
+    minutes = total_seconds // 60
+    if minutes < 60:
+        return f"{minutes} minute{'s' if minutes != 1 else ''}"
+
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours} hour{'s' if hours != 1 else ''}"
+
+    days = hours // 24
+    if days < 14:
+        return f"{days} day{'s' if days != 1 else ''}"
+
+    weeks = days // 7
+    return f"{weeks} week{'s' if weeks != 1 else ''}"
+
+
+def _format_time_ago(dt: datetime) -> str:
+    """Format a datetime as time ago from now.
+
+    Examples:
+        - "2 minutes ago"
+        - "3 hours ago"
+        - "1 day ago"
+
+    Args:
+        dt: The datetime to format
+
+    Returns:
+        Human-readable "time ago" string
+    """
+    now = datetime.now(timezone.utc)
+    # Ensure dt is timezone-aware
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+
+    diff = now - dt
+    return _format_timedelta(diff) + " ago"
 
 
 @dataclass
@@ -28,6 +91,9 @@ class AuthStatus:
         authenticated: Whether we have valid tokens
         expired: Whether the token is expired
         expires_at: When the token expires (ISO format string)
+        expires_in_human: Human-readable time until expiry (e.g., "45 minutes")
+        issued_at: When the token was issued (ISO format string)
+        issued_ago_human: Human-readable time since issuance (e.g., "2 hours ago")
         has_refresh_token: Whether a refresh token is available
         scope: Granted scopes
         error: Any error message
@@ -38,6 +104,9 @@ class AuthStatus:
     authenticated: bool = False
     expired: bool = False
     expires_at: str | None = None
+    expires_in_human: str | None = None
+    issued_at: str | None = None
+    issued_ago_human: str | None = None
     has_refresh_token: bool = False
     scope: str | None = None
     error: str | None = None
@@ -50,6 +119,9 @@ class AuthStatus:
             "authenticated": self.authenticated,
             "expired": self.expired,
             "expires_at": self.expires_at,
+            "expires_in_human": self.expires_in_human,
+            "issued_at": self.issued_at,
+            "issued_ago_human": self.issued_ago_human,
             "has_refresh_token": self.has_refresh_token,
             "scope": self.scope,
             "error": self.error,
@@ -64,6 +136,9 @@ class AuthStatus:
             authenticated=data.get("authenticated", False),
             expired=data.get("expired", False),
             expires_at=data.get("expires_at"),
+            expires_in_human=data.get("expires_in_human"),
+            issued_at=data.get("issued_at"),
+            issued_ago_human=data.get("issued_ago_human"),
             has_refresh_token=data.get("has_refresh_token", False),
             scope=data.get("scope"),
             error=data.get("error"),
@@ -218,12 +293,35 @@ class OAuthManager:
                 authenticated=False,
             )
 
+        # Calculate human-readable expiry
+        expires_in_human = None
+        if token.expires_at:
+            # Ensure expires_at is timezone-aware
+            expires_at = token.expires_at
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+            now = datetime.now(timezone.utc)
+            remaining = expires_at - now
+            if remaining.total_seconds() > 0:
+                expires_in_human = _format_timedelta(remaining)
+            else:
+                expires_in_human = "Expired"
+
+        # Calculate human-readable issue time
+        issued_ago_human = None
+        if token.issued_at:
+            issued_ago_human = _format_time_ago(token.issued_at)
+
         return AuthStatus(
             server_url=server_url,
             server_name=server_name,
             authenticated=True,
             expired=token.is_expired(),
             expires_at=token.expires_at.isoformat() if token.expires_at else None,
+            expires_in_human=expires_in_human,
+            issued_at=token.issued_at.isoformat() if token.issued_at else None,
+            issued_ago_human=issued_ago_human,
             has_refresh_token=token.has_refresh_token(),
             scope=token.scope,
         )
