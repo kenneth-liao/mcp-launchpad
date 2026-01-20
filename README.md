@@ -92,9 +92,17 @@ When multiple config files are found, mcpl prompts you to select which ones to u
 
 ## Agent Integration
 
-MCP Launchpad works with any AI agent that can run bash commands (Claude Code, Cursor, Windsurf, etc.). 
+MCP Launchpad works with any AI agent that can run bash commands (Claude Code, Cursor, Windsurf, etc.).
 
 Copy the root `CLAUDE.md` contents into your own `CLAUDE.md` or `AGENTS.md` to teach your agent how to use `mcpl`. This can be done at the project level (`./CLAUDE.md`) or user level (`~/.claude/CLAUDE.md`).
+
+> **Important: OAuth Authentication**
+>
+> Agents cannot complete OAuth flows because they require browser interaction. You must authenticate all OAuth-protected MCP servers **before** agents can use them:
+> ```bash
+> mcpl auth login <server>    # Run this yourself for each OAuth server
+> mcpl auth status            # Verify all servers are authenticated
+> ```
 
 **Tip**: Add a section to your `CLAUDE.md` listing your connected MCP servers for better tool discovery.
 
