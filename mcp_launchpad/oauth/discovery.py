@@ -422,9 +422,13 @@ async def discover_oauth_config(
     """Perform full OAuth discovery for an MCP server.
 
     This is the main entry point for OAuth discovery. It:
-    1. Fetches Protected Resource Metadata (or uses WWW-Authenticate header)
-    2. Fetches Authorization Server Metadata
-    3. Computes the resource URI for token binding
+    1. Tries to fetch Protected Resource Metadata (RFC 9728)
+    2. If RFC 9728 fails, falls back to direct RFC 8414 discovery
+    3. Fetches Authorization Server Metadata
+    4. Computes the resource URI for token binding
+
+    The RFC 8414 fallback enables authentication with servers like Linear and
+    Sentry that implement RFC 8414 but not RFC 9728.
 
     Args:
         server_url: The MCP server URL
@@ -442,18 +446,85 @@ async def discover_oauth_config(
     should_close = http_client is None
 
     try:
-        # Step 1: Get resource metadata
-        if www_authenticate:
-            metadata_url = get_resource_metadata_url(www_authenticate)
-            resource_metadata = await fetch_protected_resource_metadata(
-                metadata_url, client, timeout
-            )
-        else:
-            resource_metadata = await fetch_protected_resource_metadata(
-                server_url, client, timeout
+        # Step 1: Try to get resource metadata (RFC 9728)
+        resource_metadata: ProtectedResourceMetadata | None = None
+        prm_error: DiscoveryError | None = None
+
+        try:
+            if www_authenticate:
+                try:
+                    metadata_url = get_resource_metadata_url(www_authenticate)
+                    resource_metadata = await fetch_protected_resource_metadata(
+                        metadata_url, client, timeout
+                    )
+                except DiscoveryError as e:
+                    # If www_authenticate URL fails, save error and try fallback
+                    prm_error = e
+                    logger.debug(f"RFC 9728 discovery from www_authenticate failed: {e}")
+            else:
+                resource_metadata = await fetch_protected_resource_metadata(
+                    server_url, client, timeout
+                )
+        except DiscoveryError as e:
+            prm_error = e
+            logger.debug(f"RFC 9728 discovery failed: {e}")
+
+        # Step 2: If RFC 9728 failed, try RFC 8414 fallback
+        # This handles servers like Linear and Sentry that implement RFC 8414 but not RFC 9728
+        if resource_metadata is None and prm_error is not None:
+            logger.info(
+                f"RFC 9728 discovery failed for {server_url}, "
+                f"attempting RFC 8414 fallback: {prm_error}"
             )
 
-        # Step 2: Validate we have at least one auth server
+            try:
+                # Try to fetch auth server metadata directly from server URL
+                auth_server_metadata = await fetch_auth_server_metadata(
+                    server_url, client, timeout
+                )
+
+                # Validate PKCE support (required by MCP spec)
+                if not auth_server_metadata.supports_pkce():
+                    raise DiscoveryError(
+                        f"Authorization server {server_url} does not support PKCE with S256, "
+                        f"which is required by the MCP specification"
+                    )
+
+                # Create synthetic ProtectedResourceMetadata
+                resource_uri = compute_resource_uri(server_url)
+                resource_metadata = ProtectedResourceMetadata(
+                    resource=resource_uri,
+                    authorization_servers=[auth_server_metadata.issuer],
+                    scopes_supported=auth_server_metadata.scopes_supported,
+                )
+
+                logger.info(
+                    f"RFC 8414 fallback succeeded for {server_url}, "
+                    f"using issuer: {auth_server_metadata.issuer}"
+                )
+
+                return OAuthConfig(
+                    resource_metadata=resource_metadata,
+                    auth_server_metadata=auth_server_metadata,
+                    resource_uri=resource_uri,
+                )
+            except DiscoveryError as fallback_error:
+                # RFC 8414 fallback also failed - raise original error with context
+                raise DiscoveryError(
+                    f"OAuth discovery failed for {server_url}.\n\n"
+                    f"RFC 9728 (Protected Resource Metadata) error:\n  {prm_error}\n\n"
+                    f"RFC 8414 (Authorization Server Metadata) fallback error:\n  {fallback_error}\n\n"
+                    f"The server may not support OAuth discovery, or the URL may be incorrect."
+                ) from fallback_error
+
+        # If we still don't have resource_metadata, something went wrong
+        if resource_metadata is None:
+            raise DiscoveryError(
+                f"Failed to discover OAuth configuration for {server_url}. "
+                f"No error was captured - this is unexpected."
+            )
+
+        # Step 3: Validate we have at least one auth server
         if not resource_metadata.authorization_servers:
             raise DiscoveryError(
                 f"Resource metadata for {server_url} does not specify any authorization servers. "
@@ -461,20 +532,20 @@ async def discover_oauth_config(
                 f"an 'authorization_servers' field."
             )
 
-        # Step 3: Fetch auth server metadata (use first auth server)
+        # Step 4: Fetch auth server metadata (use first auth server)
         auth_server_url = resource_metadata.authorization_servers[0]
         auth_server_metadata = await fetch_auth_server_metadata(
             auth_server_url, client, timeout
         )
 
-        # Step 4: Validate PKCE support (required by MCP spec)
+        # Step 5: Validate PKCE support (required by MCP spec)
         if not auth_server_metadata.supports_pkce():
             raise DiscoveryError(
                 f"Authorization server {auth_server_url} does not support PKCE with S256, "
                 f"which is required by the MCP specification"
             )
 
-        # Step 5: Get resource URI from Protected Resource Metadata (RFC 9728)
+        # Step 6: Get resource URI from Protected Resource Metadata (RFC 9728)
         # The resource metadata's "resource" field is authoritative - it tells us
         # what resource identifier to use for RFC 8707 resource indicators.
         # Only fall back to computing from URL if metadata doesn't specify it.
