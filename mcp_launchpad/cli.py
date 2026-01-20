@@ -14,7 +14,11 @@ import click
 
 from . import __version__
 from .cache import ToolCache
-from .config import Config, load_config
+from .config import Config, count_servers_in_config, discover_all_config_files, load_config
+from .config_preferences import (
+    get_config_preferences_manager,
+    is_interactive,
+)
 from .connection import ConnectionManager, ToolInfo
 from .oauth import OAuthFlowError, TokenDecryptionError, get_oauth_manager
 from .output import OutputHandler
@@ -113,6 +117,223 @@ def main(
         )
     else:
         logging.basicConfig(level=logging.WARNING)
+
+
+def _handle_first_run_prompt(ctx: click.Context) -> None:
+    """Handle first-run config selection prompt if needed.
+
+    Shows an interactive prompt when:
+    - Multiple config files are discovered
+    - No preferences have been set yet
+    - Running in an interactive TTY
+    - No explicit --config flag was provided
+    """
+    # Skip if explicit config path provided
+    if ctx.obj.get("config_path"):
+        return
+
+    prefs_manager = get_config_preferences_manager()
+    discovered = discover_all_config_files()
+
+    # Check if first-run prompt is needed
+    if not prefs_manager.needs_first_run_prompt(discovered):
+        return
+
+    # Update discovered configs
+    prefs_manager.update_discovered(discovered)
+
+    # Show the prompt
+    click.echo()
+    click.secho("Multiple MCP config files found:\n", bold=True)
+
+    for i, path in enumerate(discovered, 1):
+        server_count = count_servers_in_config(path)
+        display_path = str(path).replace(str(Path.home()), "~")
+        click.echo(f"  [{i}] {display_path} ({server_count} servers)")
+
+    click.echo()
+    click.echo("Which config files would you like to use?")
+    click.echo("Enter numbers (comma-separated), 'all' for all, or press Enter for [1]: ", nl=False)
+
+    try:
+        user_input = input().strip()
+    except (EOFError, KeyboardInterrupt):
+        # Non-interactive or interrupted - use all configs
+        click.echo()
+        prefs_manager.set_active_configs(discovered)
+        prefs_manager.mark_first_run_completed()
+        return
+
+    if not user_input:
+        # Default to first config
+        selected = [discovered[0]]
+    elif user_input.lower() == "all":
+        selected = discovered
+    else:
+        # Parse comma-separated numbers
+        selected = []
+        for part in user_input.split(","):
+            part = part.strip()
+            try:
+                idx = int(part)
+                if 1 <= idx <= len(discovered):
+                    selected.append(discovered[idx - 1])
+                else:
+                    click.secho(f"Invalid number: {part} (must be 1-{len(discovered)})", fg="red")
+                    # Fall back to all configs on error
+                    click.secho("Falling back to using all config files.", fg="yellow")
+                    selected = discovered
+                    break
+            except ValueError:
+                click.secho(f"Invalid input: {part}", fg="red")
+                # Fall back to all configs on error
+                click.secho("Falling back to using all config files.", fg="yellow")
+                selected = discovered
+                break
+
+    # Save selection
+    prefs_manager.set_active_configs(selected)
+    prefs_manager.mark_first_run_completed()
+
+    click.echo()
+    click.secho(f"Using {len(selected)} config file(s). This choice is saved.", fg="green")
+    click.echo("To change later: ", nl=False)
+    click.secho("mcpl config files --select", fg="cyan")
+
+
+def _display_config_files(
+    discovered: list[Path],
+    active: list[Path],
+    output: OutputHandler,
+) -> None:
+    """Display config files with their status.
+
+    Called automatically when first-run prompt is needed and running
+    interactively, or when 'mcpl config files' is called.
+    """
+    active_set = {str(p) for p in active}
+
+    if output.json_mode:
+        output.print_json({
+            "config_files": [
+                {
+                    "path": str(path),
+                    "display_path": str(path).replace(str(Path.home()), "~"),
+                    "active": str(path) in active_set,
+                    "server_count": count_servers_in_config(path),
+                }
+                for path in discovered
+            ]
+        })
+    else:
+        click.echo()
+        click.secho("Config Files:", bold=True)
+        click.echo()
+
+        for i, path in enumerate(discovered, 1):
+            display_path = str(path).replace(str(Path.home()), "~")
+            server_count = count_servers_in_config(path)
+            is_active = str(path) in active_set
+
+            if is_active:
+                status = click.style("✓ ACTIVE", fg="green")
+            else:
+                status = click.style("✗ INACTIVE", fg="yellow")
+
+            click.echo(f"  [{i}] {display_path} {status} ({server_count} servers)")
+
+        click.echo()
+
+
+def _resolve_config_reference(ref: str, discovered: list[Path]) -> Path | None:
+    """Resolve a config reference (number or path) to a Path.
+
+    Args:
+        ref: Either a number (1-indexed) or a file path
+        discovered: List of discovered config files
+
+    Returns:
+        Resolved Path or None if not found/ambiguous
+    """
+    # Try as number first
+    try:
+        idx = int(ref)
+        if 1 <= idx <= len(discovered):
+            return discovered[idx - 1]
+        return None
+    except ValueError:
+        pass
+
+    # Try as exact path
+    path = Path(ref).expanduser().resolve()
+    if path in discovered:
+        return path
+    if path.exists():
+        return path
+
+    # Try matching against discovered paths (partial match)
+    # Require unique match to avoid ambiguity
+    matches = [disc_path for disc_path in discovered if ref in str(disc_path)]
+    if len(matches) == 1:
+        return matches[0]
+
+    return None
+
+
+def _restart_daemon_for_config_change(output: OutputHandler) -> None:
+    """Restart the daemon to pick up config changes."""
+    client = SessionClient()
+
+    if client.is_daemon_running():
+        output.info("Restarting daemon to apply config changes...")
+        try:
+            client.shutdown()
+            click.echo("  Daemon stopped. It will auto-restart on next command.")
+        except Exception as e:
+            output.warning(f"Could not stop daemon: {e}")
+
+
+def _run_interactive_config_selection(
+    discovered: list[Path],
+) -> list[Path]:
+    """Run interactive config file selection.
+
+    Returns list of selected config files.
+    """
+    click.echo()
+    click.secho("Select config files to use:", bold=True)
+    click.echo()
+
+    for i, path in enumerate(discovered, 1):
+        display_path = str(path).replace(str(Path.home()), "~")
+        server_count = count_servers_in_config(path)
+        click.echo(f"  [{i}] {display_path} ({server_count} servers)")
+
+    click.echo()
+    click.echo("Enter numbers (comma-separated), 'all' for all: ", nl=False)
+
+    try:
+        user_input = input().strip()
+    except (EOFError, KeyboardInterrupt):
+        click.echo()
+        return []
+
+    if user_input.lower() == "all":
+        return discovered
+
+    selected = []
+    for part in user_input.split(","):
+        part = part.strip()
+        try:
+            idx = int(part)
+            if 1 <= idx <= len(discovered):
+                selected.append(discovered[idx - 1])
+            else:
+                click.secho(f"Invalid number: {part}", fg="red")
+        except ValueError:
+            click.secho(f"Invalid input: {part}", fg="red")
+
+    return selected
 
 
 def get_config(ctx: click.Context) -> Config | NoReturn:
@@ -446,7 +667,7 @@ def _handle_oauth_required_servers(
             def on_status(message: str) -> None:
                 click.echo(f"  {message}")
 
-            token = asyncio.run(
+            asyncio.run(
                 oauth_manager.authenticate(
                     server_url=url,
                     client_id=server_config.get_resolved_oauth_client_id(),
@@ -459,7 +680,7 @@ def _handle_oauth_required_servers(
             click.secho(f"✓ Authenticated with '{server_name}'", fg="green")
 
             # Retry connection for this server
-            click.echo(f"  Retrying connection...")
+            click.echo("  Retrying connection...")
 
             def retry_progress(
                 name: str, status: str, tool_count: int | None, error: str | None
@@ -1292,26 +1513,30 @@ def verify(ctx: click.Context, timeout: int) -> None:
                     click.echo(f"  mcpl list {r['server']} --refresh")
 
 
-@main.command("config")
+@main.group(name="config", invoke_without_command=True)
 @click.option(
     "--show-secrets",
     is_flag=True,
     help="Show actual values of environment variables (use with caution)",
 )
 @click.pass_context
-def show_config(ctx: click.Context, show_secrets: bool) -> None:
-    """Show the current MCP configuration.
+def config(ctx: click.Context, show_secrets: bool) -> None:
+    """Show or manage MCP configuration.
 
     Displays the config file path, env file path, and all configured
     servers with their commands, arguments, and environment variables.
     """
+    # If a subcommand was invoked, let it handle the output
+    if ctx.invoked_subcommand is not None:
+        return
+
     output: OutputHandler = ctx.obj["output"]
-    config = get_config(ctx)
-    state = ServerState(config)
+    cfg = get_config(ctx)
+    state = ServerState(cfg)
 
     if ctx.obj["json_mode"]:
         servers_data = {}
-        for name, server in config.servers.items():
+        for name, server in cfg.servers.items():
             server_info: dict[str, Any] = {
                 "type": server.server_type,
                 "disabled": state.is_disabled(name),
@@ -1337,21 +1562,21 @@ def show_config(ctx: click.Context, show_secrets: bool) -> None:
 
         output.success(
             {
-                "configPath": str(config.config_path) if config.config_path else None,
-                "envPaths": [str(p) for p in config.env_paths] if config.env_paths else [],
+                "configPath": str(cfg.config_path) if cfg.config_path else None,
+                "envPaths": [str(p) for p in cfg.env_paths] if cfg.env_paths else [],
                 "servers": servers_data,
             }
         )
     else:
         click.secho("\nMCP Configuration\n", bold=True)
-        click.echo(f"  Config file: {config.config_path or 'Not found'}")
-        if config.env_paths:
-            click.echo(f"  Env files: {', '.join(str(p) for p in config.env_paths)}")
+        click.echo(f"  Config file: {cfg.config_path or 'Not found'}")
+        if cfg.env_paths:
+            click.echo(f"  Env files: {', '.join(str(p) for p in cfg.env_paths)}")
         else:
             click.echo("  Env file: Not found")
 
         click.secho("\nConfigured Servers:\n", bold=True)
-        for name, server in config.servers.items():
+        for name, server in cfg.servers.items():
             click.secho(f"  [{name}]", fg="cyan", bold=True, nl=False)
             if state.is_disabled(name):
                 click.secho(" (disabled)", fg="red")
@@ -1402,6 +1627,177 @@ def show_config(ctx: click.Context, show_secrets: bool) -> None:
                             else:
                                 click.echo(f"      {key}: ***")
             click.echo()
+
+
+@config.command("files")
+@click.option(
+    "--select",
+    is_flag=True,
+    help="Interactively select which config files to use",
+)
+@click.option(
+    "--activate",
+    metavar="REF",
+    help="Activate a config file (number or path)",
+)
+@click.option(
+    "--deactivate",
+    metavar="REF",
+    help="Deactivate a config file (number or path)",
+)
+@click.option(
+    "--all",
+    "activate_all",
+    is_flag=True,
+    help="Activate all discovered config files",
+)
+@click.option(
+    "--reset",
+    is_flag=True,
+    help="Clear preferences (re-prompts on next run if multiple configs)",
+)
+@click.pass_context
+def config_files(
+    ctx: click.Context,
+    select: bool,
+    activate: str | None,
+    deactivate: str | None,
+    activate_all: bool,
+    reset: bool,
+) -> None:
+    """View and manage which MCP config files are active.
+
+    When multiple config files exist (e.g., mcp.json and backup_mcp.json),
+    this command shows which are active and allows switching between them.
+
+    Examples:
+
+    \b
+        mcpl config files                    # View config files
+        mcpl config files --select           # Interactive selection
+        mcpl config files --activate 1       # Activate by number
+        mcpl config files --deactivate 2     # Deactivate by number
+        mcpl config files --all              # Activate all configs
+        mcpl config files --reset            # Clear preferences
+    """
+    output: OutputHandler = ctx.obj["output"]
+    prefs_manager = get_config_preferences_manager()
+    discovered = discover_all_config_files()
+
+    if not discovered:
+        output.error(
+            Exception("No config files found"),
+            help_text="Create a config file with MCP servers. See: mcpl --help",
+        )
+        return
+
+    # Get current active configs
+    active = prefs_manager.get_active_configs(discovered)
+
+    # Handle --reset
+    if reset:
+        prefs_manager.reset()
+        if not ctx.obj["json_mode"]:
+            click.secho("Config preferences reset.", fg="green")
+            click.echo("First-run prompt will appear on next command if multiple configs exist.")
+        else:
+            output.success({"action": "reset", "success": True})
+        return
+
+    # Handle --all
+    if activate_all:
+        prefs_manager.set_active_configs(discovered)
+        prefs_manager.mark_first_run_completed()
+        _restart_daemon_for_config_change(output)
+        if not ctx.obj["json_mode"]:
+            click.secho(f"Activated all {len(discovered)} config file(s).", fg="green")
+        else:
+            output.success({
+                "action": "activate_all",
+                "count": len(discovered),
+                "configs": [str(p) for p in discovered],
+            })
+        return
+
+    # Handle --activate
+    if activate:
+        resolved = _resolve_config_reference(activate, discovered)
+        if not resolved:
+            output.error(
+                Exception(f"Could not find config file: {activate}"),
+                help_text="Use a number from 'mcpl config files' or a file path.",
+            )
+            return
+
+        changed = prefs_manager.activate(resolved)
+        prefs_manager.mark_first_run_completed()
+        if changed:
+            _restart_daemon_for_config_change(output)
+
+        if not ctx.obj["json_mode"]:
+            display_path = str(resolved).replace(str(Path.home()), "~")
+            if changed:
+                click.secho(f"Activated: {display_path}", fg="green")
+            else:
+                click.echo(f"Already active: {display_path}")
+        else:
+            output.success({
+                "action": "activate",
+                "path": str(resolved),
+                "changed": changed,
+            })
+        return
+
+    # Handle --deactivate
+    if deactivate:
+        resolved = _resolve_config_reference(deactivate, discovered)
+        if not resolved:
+            output.error(
+                Exception(f"Could not find config file: {deactivate}"),
+                help_text="Use a number from 'mcpl config files' or a file path.",
+            )
+            return
+
+        changed = prefs_manager.deactivate(resolved)
+        if changed:
+            _restart_daemon_for_config_change(output)
+
+        if not ctx.obj["json_mode"]:
+            display_path = str(resolved).replace(str(Path.home()), "~")
+            if changed:
+                click.secho(f"Deactivated: {display_path}", fg="yellow")
+            else:
+                click.echo(f"Already inactive: {display_path}")
+        else:
+            output.success({
+                "action": "deactivate",
+                "path": str(resolved),
+                "changed": changed,
+            })
+        return
+
+    # Handle --select
+    if select:
+        if not is_interactive():
+            output.error(
+                Exception("Interactive selection requires a TTY"),
+                help_text="Use --activate/--deactivate for non-interactive use.",
+            )
+            return
+
+        selected = _run_interactive_config_selection(discovered)
+        if selected:
+            prefs_manager.set_active_configs(selected)
+            prefs_manager.mark_first_run_completed()
+            _restart_daemon_for_config_change(output)
+            click.echo()
+            click.secho(f"Activated {len(selected)} config file(s).", fg="green")
+        else:
+            click.echo("No changes made.")
+        return
+
+    # Default: show config files
+    _display_config_files(discovered, active, output)
 
 
 @main.command()
