@@ -14,6 +14,7 @@ from typing import Any, TextIO, cast
 
 import httpx
 from mcp import ClientSession, StdioServerParameters
+from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
@@ -162,7 +163,10 @@ class Daemon:
         """Connect to a single MCP server and maintain the connection with auto-restart."""
         server_config = self.state.config.servers[server_name]
 
-        if server_config.is_http():
+        # Check SSE first (before is_http since both return True for SSE type)
+        if server_config.is_sse():
+            await self._connect_sse_server(server_name, server_config)
+        elif server_config.is_http():
             await self._connect_http_server(server_name, server_config)
         else:
             await self._connect_stdio_server(server_name, server_config)
@@ -285,6 +289,114 @@ class Daemon:
                 server_state.session = None
                 await http_client.aclose()
                 server_state.http_client = None
+
+            # Wait before retrying with exponential backoff
+            if self.state.running and attempt < MAX_RECONNECT_ATTEMPTS:
+                delay = _get_backoff_delay(attempt)
+                logger.info(
+                    f"Server {server_name}: retrying in {delay}s "
+                    f"(attempt {attempt}/{MAX_RECONNECT_ATTEMPTS})"
+                )
+                await asyncio.sleep(delay)
+
+        if attempt >= MAX_RECONNECT_ATTEMPTS:
+            logger.error(
+                f"Server {server_name}: max reconnection attempts reached, giving up"
+            )
+
+    async def _connect_sse_server(
+        self, server_name: str, server_config: ServerConfig
+    ) -> None:
+        """Connect to an SSE-based MCP server.
+
+        This transport type uses Server-Sent Events for bidirectional communication:
+        - Client connects to SSE endpoint (GET)
+        - Server sends endpoint URL via 'endpoint' event
+        - Client POSTs messages to that endpoint
+        - Server sends responses via 'message' events on SSE stream
+        """
+        attempt = 0
+        url = server_config.get_resolved_url()
+        headers = server_config.get_resolved_headers()
+
+        # Inject API key or OAuth token if available and no Authorization header configured
+        if "Authorization" not in headers:
+            # Priority: 1) Static API key, 2) OAuth token
+            api_key = server_config.get_resolved_api_key()
+            if api_key:
+                headers["Authorization"] = f"Bearer {api_key}"
+                logger.debug(f"Using static API key for '{server_name}'")
+            else:
+                oauth_manager = get_oauth_manager()
+                auth_header = oauth_manager.get_auth_header(url)
+                if auth_header:
+                    headers["Authorization"] = auth_header
+                    logger.debug(f"Using stored OAuth token for '{server_name}'")
+
+        if not url:
+            server_state = ServerState(
+                name=server_name,
+                error="SSE server is missing 'url' in configuration",
+            )
+            self.state.servers[server_name] = server_state
+            return
+
+        while self.state.running and attempt < MAX_RECONNECT_ATTEMPTS:
+            attempt += 1
+
+            existing_state = self.state.servers.get(server_name)
+            if not existing_state:
+                server_state = ServerState(name=server_name)
+                self.state.servers[server_name] = server_state
+            else:
+                server_state = existing_state
+                server_state.error = None
+
+            try:
+                async with asyncio.timeout(CONNECTION_TIMEOUT):
+                    async with sse_client(
+                        url,
+                        headers=headers,
+                        timeout=30.0,
+                        sse_read_timeout=CONNECTION_TIMEOUT,
+                    ) as (read, write):
+                        async with ClientSession(read, write) as session:
+                            await session.initialize()
+
+                            server_state.session = session
+                            server_state.connected = True
+                            attempt = 0  # Reset on success
+                            logger.info(f"Connected to SSE server: {server_name}")
+
+                            # Keep connection alive until daemon shuts down
+                            while self.state.running:
+                                await asyncio.sleep(1)
+
+                            # Clean exit
+                            return
+
+            except TimeoutError:
+                server_state.error = (
+                    f"Connection timed out after {CONNECTION_TIMEOUT}s.\n"
+                    f"URL: {url}"
+                )
+                logger.error(f"Server {server_name}: {server_state.error}")
+            except httpx.ConnectError as e:
+                server_state.error = (
+                    f"Could not connect to SSE server.\n"
+                    f"URL: {url}\n"
+                    f"Error: {e}"
+                )
+                logger.error(f"Server {server_name}: {server_state.error}")
+            except asyncio.CancelledError:
+                logger.debug(f"Server {server_name}: connection task cancelled")
+                return
+            except Exception as e:
+                server_state.error = str(e)
+                logger.error(f"Server {server_name} error: {e}")
+            finally:
+                server_state.connected = False
+                server_state.session = None
 
             # Wait before retrying with exponential backoff
             if self.state.running and attempt < MAX_RECONNECT_ATTEMPTS:
