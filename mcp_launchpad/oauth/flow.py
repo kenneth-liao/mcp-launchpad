@@ -271,7 +271,7 @@ async def exchange_code_for_tokens(
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
 
-        if response.status_code != 200:
+        if not response.is_success:
             error_detail = ""
             try:
                 error_data = response.json()
@@ -344,7 +344,7 @@ async def refresh_token(
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
 
-        if response.status_code != 200:
+        if not response.is_success:
             error_detail = ""
             try:
                 error_data = response.json()
