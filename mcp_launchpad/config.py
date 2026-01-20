@@ -1,13 +1,18 @@
 """Config discovery and loading for MCP Launchpad."""
 
+from __future__ import annotations
+
 import json
 import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from dotenv import load_dotenv
+
+if TYPE_CHECKING:
+    from .config_preferences import ConfigPreferencesManager
 
 
 def _resolve_env_vars(value: str) -> str:
@@ -115,23 +120,15 @@ EXCLUDED_CONFIG_FILES = {".mcp.json"}
 
 
 
-def find_config_files(explicit_path: Path | None = None) -> list[Path]:
-    """Find all MCP config files with 'mcp' in the filename.
+def discover_all_config_files() -> list[Path]:
+    """Discover all MCP config files without applying preferences.
 
-    Searches for JSON files containing 'mcp' in the filename (case-insensitive),
-    excluding '.mcp.json' (Claude Code's convention) to avoid collision.
-
-    Args:
-        explicit_path: If provided, returns only this path if it exists.
+    This is the raw discovery function that finds all potential config files.
+    Use find_config_files() to get filtered results based on user preferences.
 
     Returns:
-        List of found config file paths, ordered by search directory priority.
+        List of all found config file paths, ordered by search directory priority.
     """
-    if explicit_path:
-        if explicit_path.exists():
-            return [explicit_path.resolve()]
-        return []
-
     found_files: list[Path] = []
     seen_resolved: set[Path] = set()  # Track resolved paths to avoid duplicates
 
@@ -157,6 +154,52 @@ def find_config_files(explicit_path: Path | None = None) -> list[Path]:
             found_files.append(resolved)
 
     return found_files
+
+
+def find_config_files(
+    explicit_path: Path | None = None,
+    respect_preferences: bool = True,
+    preferences_manager: ConfigPreferencesManager | None = None,
+) -> list[Path]:
+    """Find MCP config files with 'mcp' in the filename.
+
+    Searches for JSON files containing 'mcp' in the filename (case-insensitive),
+    excluding '.mcp.json' (Claude Code's convention) to avoid collision.
+
+    When multiple config files exist, this function respects user preferences
+    for which configs to use (unless respect_preferences=False).
+
+    Args:
+        explicit_path: If provided, returns only this path if it exists.
+        respect_preferences: If True, filter by user's active config preferences.
+        preferences_manager: Optional manager instance (for testing).
+
+    Returns:
+        List of found config file paths, ordered by search directory priority.
+    """
+    # Explicit path always takes precedence
+    if explicit_path:
+        if explicit_path.exists():
+            return [explicit_path.resolve()]
+        return []
+
+    # Discover all potential config files
+    discovered = discover_all_config_files()
+
+    if not respect_preferences:
+        return discovered
+
+    # Check for environment variable override first
+    from .config_preferences import get_config_preferences_manager
+
+    manager = preferences_manager or get_config_preferences_manager()
+
+    env_override = manager.get_env_override()
+    if env_override is not None:
+        return env_override
+
+    # Apply user preferences to filter discovered configs
+    return manager.get_active_configs(discovered)
 
 
 def find_config_file(explicit_path: Path | None = None) -> Path | None:
@@ -199,6 +242,26 @@ def find_env_file(explicit_path: Path | None = None) -> Path | None:
     return files[0] if files else None
 
 
+def count_servers_in_config(config_path: Path) -> int:
+    """Count the number of servers defined in a config file.
+
+    This is a lightweight function that reads a config file and counts
+    servers without parsing the full configuration.
+
+    Args:
+        config_path: Path to the config file
+
+    Returns:
+        Number of servers in the config file, or 0 if file is invalid
+    """
+    try:
+        with open(config_path) as f:
+            data = json.load(f)
+        return len(data.get("mcpServers", {}))
+    except (json.JSONDecodeError, OSError):
+        return 0
+
+
 def parse_server_config(name: str, data: dict[str, Any]) -> ServerConfig:
     """Parse a server configuration from JSON data.
 
@@ -228,15 +291,23 @@ def parse_server_config(name: str, data: dict[str, Any]) -> ServerConfig:
 def load_config(
     config_path: Path | None = None,
     env_path: Path | None = None,
+    respect_preferences: bool = True,
+    preferences_manager: ConfigPreferencesManager | None = None,
 ) -> Config:
     """Load MCP configuration from discovered or explicit paths.
 
     Finds all JSON files with 'mcp' in the filename (excluding '.mcp.json'
     which is reserved for Claude Code) and aggregates servers from all of them.
 
+    When multiple config files exist, respects user preferences for which
+    configs to use (unless explicit config_path is provided or
+    respect_preferences=False).
+
     Args:
-        config_path: Explicit path to config file (optional)
+        config_path: Explicit path to config file (optional, bypasses preferences)
         env_path: Explicit path to .env file (optional)
+        respect_preferences: If True, filter by user's active config preferences
+        preferences_manager: Optional manager instance (for testing)
 
     Returns:
         Config object with loaded servers from all found config files
@@ -250,8 +321,12 @@ def load_config(
     for env_file in env_files:
         load_dotenv(env_file)
 
-    # Find all config files
-    config_files = find_config_files(config_path)
+    # Find config files (explicit path bypasses preferences)
+    config_files = find_config_files(
+        explicit_path=config_path,
+        respect_preferences=respect_preferences if config_path is None else False,
+        preferences_manager=preferences_manager,
+    )
     if not config_files:
         searched = ", ".join(str(p) for p in CONFIG_SEARCH_DIRS)
         raise FileNotFoundError(
