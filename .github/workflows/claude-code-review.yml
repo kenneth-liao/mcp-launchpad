@@ -36,9 +36,63 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
-          plugins: 'code-review@claude-code-plugins'
-          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+            TRIGGER EVENT: ${{ github.event.action }}
+
+            ## Your Task
+
+            You are reviewing this pull request. This may be:
+            - An **initial review** (if this PR was just opened)
+            - A **follow-up review** (if new commits were pushed after a previous review)
+
+            ## Step 1: Fetch Comment History
+
+            FIRST, fetch all existing comments on this PR using:
+            ```
+            gh pr view ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --json comments --jq '.comments[] | "[\(.author.login) at \(.createdAt)]:\n\(.body)\n---"'
+            ```
+
+            ## Step 2: Analyze Previous Reviews
+
+            After fetching comments, check if YOU (claude) have already reviewed this PR:
+            1. Look for comments from the "claude" user
+            2. If you find your previous review, note the issues you raised
+            3. Check if the PR author responded with fixes or explanations
+
+            ## Step 3: Review Strategy
+
+            **If this is a FOLLOW-UP review** (you found your previous comments):
+            1. Acknowledge fixes that were made (e.g., "✅ The duplicate secret handling has been addressed")
+            2. Only raise issues that are NEW or still UNRESOLVED
+            3. Do NOT repeat issues that have already been fixed in the code
+            4. If all issues are resolved, congratulate the author and approve
+
+            **If this is an INITIAL review** (no previous comments from you):
+            - Perform a full review as normal
+
+            ## Review Criteria
+
+            Please review the current state of the code for:
+            - **Code quality and best practices** - Clean code, proper naming, DRY principles
+            - **Potential bugs or issues** - Edge cases, null handling, race conditions
+            - **Performance considerations** - Unnecessary loops, N+1 queries, memory leaks
+            - **Security concerns** - Input validation, injection vulnerabilities, auth issues
+            - **Test coverage** - Are changes adequately tested?
+
+            Use the repository's CLAUDE.md for guidance on style and conventions. Be constructive and helpful in your feedback.
+
+            ## Output Format
+
+            Structure your review as:
+            1. **Summary**: Brief description of what the PR does
+            2. **Previous Feedback Status** (if follow-up): What was addressed vs still open
+            3. **New/Remaining Issues**: Any new concerns or unresolved items
+            4. **Verdict**: Approve, Request Changes, or Comment
+
+            Use `gh pr comment` with your Bash tool to leave your review as a comment on the PR.
+
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
-
+          claude_args: '--allowed-tools "Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)"'
