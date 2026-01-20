@@ -280,17 +280,22 @@ def _resolve_config_reference(ref: str, discovered: list[Path]) -> Path | None:
     return None
 
 
-def _restart_daemon_for_config_change(output: OutputHandler) -> None:
+def _restart_daemon_for_config_change(ctx: click.Context) -> None:
     """Restart the daemon to pick up config changes."""
-    client = SessionClient()
+    config = get_config(ctx)
+    session_client = SessionClient(config)
 
-    if client.is_daemon_running():
-        output.info("Restarting daemon to apply config changes...")
-        try:
-            client.shutdown()
-            click.echo("  Daemon stopped. It will auto-restart on next command.")
-        except Exception as e:
-            output.warning(f"Could not stop daemon: {e}")
+    try:
+        asyncio.run(session_client.shutdown())
+        if not ctx.obj["json_mode"]:
+            click.echo("Daemon stopped. It will auto-restart on next command.")
+    except Exception as e:
+        if "Failed to connect" in str(e):
+            # Daemon wasn't running, nothing to restart
+            pass
+        else:
+            if not ctx.obj["json_mode"]:
+                click.secho(f"Warning: Could not stop daemon: {e}", fg="yellow")
 
 
 def _run_interactive_config_selection(
@@ -1708,7 +1713,7 @@ def config_files(
     if activate_all:
         prefs_manager.set_active_configs(discovered)
         prefs_manager.mark_first_run_completed()
-        _restart_daemon_for_config_change(output)
+        _restart_daemon_for_config_change(ctx)
         if not ctx.obj["json_mode"]:
             click.secho(f"Activated all {len(discovered)} config file(s).", fg="green")
         else:
@@ -1732,7 +1737,7 @@ def config_files(
         changed = prefs_manager.activate(resolved)
         prefs_manager.mark_first_run_completed()
         if changed:
-            _restart_daemon_for_config_change(output)
+            _restart_daemon_for_config_change(ctx)
 
         if not ctx.obj["json_mode"]:
             display_path = str(resolved).replace(str(Path.home()), "~")
@@ -1760,7 +1765,7 @@ def config_files(
 
         changed = prefs_manager.deactivate(resolved)
         if changed:
-            _restart_daemon_for_config_change(output)
+            _restart_daemon_for_config_change(ctx)
 
         if not ctx.obj["json_mode"]:
             display_path = str(resolved).replace(str(Path.home()), "~")
@@ -1789,7 +1794,7 @@ def config_files(
         if selected:
             prefs_manager.set_active_configs(selected)
             prefs_manager.mark_first_run_completed()
-            _restart_daemon_for_config_change(output)
+            _restart_daemon_for_config_change(ctx)
             click.echo()
             click.secho(f"Activated {len(selected)} config file(s).", fg="green")
         else:
