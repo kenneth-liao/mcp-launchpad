@@ -1,124 +1,100 @@
 # MCP Launchpad
 
-A lightweight CLI for efficiently discovering and executing tools from multiple MCP (Model Context Protocol) servers.
+A lightweight CLI for discovering and executing tools from multiple MCP (Model Context Protocol) servers.
 
-## Features
-
-- **Unified Tool Discovery** - Search across all configured MCP servers with BM25, regex, or exact matching
-- **Persistent Connections** - Session daemon maintains server connections for faster repeated calls
-- **HTTP & Stdio Support** - Connect to both local process-based servers and remote HTTP/Streamable MCP servers
-- **SSE Transport Support** - Connect to legacy MCP servers using Server-Sent Events
-- **Multi-Config Management** - Use multiple config files simultaneously with interactive selection
-- **OAuth 2.1 Authentication** - Secure authentication for OAuth-protected MCP servers (Notion, Figma, etc.)
-- **Auto-Configuration** - Reads from `./mcp.json` (project-level) or `~/.claude/mcp.json` (user-level) for seamless integration
-- **Cross-Platform** - Works on macOS, Linux, and Windows (experimental)
-- **JSON Mode** - Machine-readable output for scripting and automation
-
-## Table of Contents
-- [Quick Start](#quick-start)
-- [Agent Integration](#agent-integration)
-- [Commands](#commands)
-- [Session Daemon](#session-daemon)
-- [Advanced Configuration](#advanced-configuration)
-  - [HTTP Server Configuration](#http-server-configuration)
-  - [SSE Transport Configuration](#sse-transport-configuration)
-  - [OAuth Authentication](#oauth-authentication)
-  - [Environment Variables](#environment-variables)
-- [Platform Notes](#platform-notes)
-
-## Requirements
-
-- Python 3.13+
-- [uv](https://docs.astral.sh/uv/getting-started/installation/) - Python package and environment manager
+![Python 3.13+](https://img.shields.io/badge/python-3.13+-blue.svg)
+![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)
 
 ## Installation
 
-The MCP Launchpad CLI is available as a uv tool. Install it with one command and it will be available globally so that any agent (Claude Code, Gemini, Codex, etc.) can use it from any project/terminal!
+> **Prerequisite**: [uv](https://docs.astral.sh/uv/getting-started/installation/) - Python package and environment manager
 
 ```bash
 uv tool install https://github.com/kenneth-liao/mcp-launchpad.git
 ```
 
-## Quick Start
+Verify it works:
 
-### 1. Set up your MCP servers
+```bash
+mcpl --help
+```
+
+## Quick Reference
+
+```bash
+# Find tools
+mcpl search "<query>"                    # Search all tools (returns 5 by default)
+mcpl search "<query>" --limit 10         # Get more results
+mcpl list                                # List all MCP servers
+mcpl list <server>                       # List tools for a server
+
+# Get tool details
+mcpl inspect <server> <tool>             # Full schema
+mcpl inspect <server> <tool> --example   # Schema + example call
+
+# Execute tools
+mcpl call <server> <tool> '{}'                        # No arguments
+mcpl call <server> <tool> '{"param": "value"}'        # With arguments
+
+# Troubleshooting
+mcpl verify                              # Test all server connections
+mcpl session status                      # Check daemon status
+mcpl session stop                        # Restart daemon (auto-restarts on next call)
+```
+
+## Configuration
 
 Create `mcp.json` in your project directory (or `~/.claude/mcp.json` for global config):
 
 ```json
 {
   "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@anthropic/mcp-server-filesystem", "/path/to/allowed/dir"]
+    }
+  }
+}
+```
+
+Validate with `mcpl list`. If you don't see your servers, restart your terminal and run `mcpl list --refresh`.
+
+### Adding More Servers
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@anthropic/mcp-server-filesystem", "/path/to/dir"]
+    },
     "github": {
       "command": "uvx",
       "args": ["mcp-server-github"],
       "env": {
         "GITHUB_TOKEN": "${GITHUB_TOKEN}"
       }
-    },
-    "filesystem": {
-      "command": "npx",
-      "args": ["-y", "@anthropic/mcp-server-filesystem", "/path/to/allowed/dir"]
-    },
-    "supabase": {
-      "type": "http",
-      "url": "https://your-project.supabase.co/functions/v1/mcp",
-      "headers": {
-        "Authorization": "Bearer ${SUPABASE_ANON_KEY}"
-      }
     }
   }
 }
 ```
 
-#### Config Discovery
+Environment variables use `${VAR}` syntax and are loaded from `~/.claude/.env` and `./.env`.
+
+### Config Discovery
 
 MCP Launchpad searches for config files in this order:
 1. `./mcp.json` - Project-level config
 2. `./.claude/mcp.json` - Project-level Claude config
 3. `~/.claude/mcp.json` - User-level config
 
-When multiple config files are found, mcpl prompts you to select which ones to use on first run. Your preferences are saved and can be changed later with `mcpl config files --select`.
-
-To override discovery entirely, set the `MCPL_CONFIG_FILES` environment variable:
-```bash
-export MCPL_CONFIG_FILES="/path/to/config1.json,/path/to/config2.json"
-```
-
-Environment variables use `${VAR}` syntax and are loaded from `~/.claude/.env` and `./.env`. See [Environment Variables](#environment-variables) for details.
-
-Validate installation with `mcpl list`. If you don't see servers, restart your terminal and run `mcpl list --refresh`.
-
-### 2. Search for tools
-
-```bash
-mcpl search "github issues"
-```
-
-### 3. Execute a tool
-
-```bash
-mcpl call github list_issues '{"owner": "anthropics", "repo": "claude-code"}'
-```
+When multiple config files are found, mcpl prompts you to select which ones to use. Your preferences are saved and can be changed later with `mcpl config files --select`.
 
 ## Agent Integration
 
-MCP Launchpad works with any AI agent that can run bash commands (Claude Code, Cursor, Windsurf, etc.). Copy the included `CLAUDE.md` to teach your agent how to use `mcpl`.
+MCP Launchpad works with any AI agent that can run bash commands (Claude Code, Cursor, Windsurf, etc.). 
 
-### Option 1: Project-Level Setup
-
-Copy `CLAUDE.md` to your project root:
-
-```bash
-curl -o CLAUDE.md https://raw.githubusercontent.com/kenneth-liao/mcp-launchpad/main/CLAUDE.md
-```
-
-### Option 2: Global Setup
-
-For access across all projects, copy to your user-level Claude directory:
-
-```bash
-curl -o ~/.claude/CLAUDE.md https://raw.githubusercontent.com/kenneth-liao/mcp-launchpad/main/CLAUDE.md
-```
+Copy the root `CLAUDE.md` contents into your own `CLAUDE.md` or `AGENTS.md` to teach your agent how to use `mcpl`. This can be done at the project level (`./CLAUDE.md`) or user level (`~/.claude/CLAUDE.md`).
 
 **Tip**: Add a section to your `CLAUDE.md` listing your connected MCP servers for better tool discovery.
 
@@ -130,6 +106,18 @@ With the instructions in place, your agent can:
 - **Execute tools** by calling `mcpl` via bash
 - **Discover capabilities** dynamically as you add new MCP servers
 - **Handle errors** gracefully with built-in troubleshooting guidance
+
+## Table of Contents
+
+- [Commands](#commands)
+- [Session Daemon](#session-daemon)
+- [Advanced Topics](#advanced-topics)
+  - [HTTP Server Configuration](#http-server-configuration)
+  - [SSE Transport Configuration](#sse-transport-configuration)
+  - [OAuth Authentication](#oauth-authentication)
+  - [Environment Variables](#environment-variables)
+- [Platform Notes](#platform-notes)
+- [Development](#development)
 
 ## Commands
 
@@ -185,7 +173,6 @@ mcpl auth login notion    # Authenticate with an OAuth-protected server
 mcpl auth logout notion   # Remove stored authentication
 mcpl auth logout --all    # Clear all stored tokens
 mcpl auth status          # Show authentication status for all servers
-mcpl auth status notion   # Show status for a specific server
 ```
 
 ### `mcpl enable|disable <server>`
@@ -226,7 +213,7 @@ Test that all configured servers can connect and respond.
 mcpl verify
 ```
 
-## JSON Mode
+### JSON Mode
 
 Add `--json` for machine-readable output:
 
@@ -241,8 +228,6 @@ MCP Launchpad uses a session daemon to maintain persistent connections to MCP se
 
 ### Automatic Cleanup
 
-The daemon shuts down automatically in these scenarios:
-
 | Environment | Cleanup Trigger |
 |-------------|-----------------|
 | Regular terminal | Parent terminal process exits |
@@ -253,54 +238,44 @@ The daemon shuts down automatically in these scenarios:
 ### Troubleshooting
 
 ```bash
-# Check daemon status and connected servers
-mcpl session status
-
-# Stop the daemon manually
-mcpl session stop
-
-# Bypass daemon entirely (slower but useful for debugging)
-mcpl call github list_repos '{}' --no-daemon
+mcpl session status                         # Check daemon status
+mcpl session stop                           # Stop the daemon manually
+mcpl call github list_repos '{}' --no-daemon  # Bypass daemon for debugging
 ```
 
 If you encounter persistent issues, stopping and restarting the daemon usually resolves them.
 
-## Advanced Configuration
+## Advanced Topics
 
 ### HTTP Server Configuration
 
-HTTP servers connect to remote MCP endpoints over HTTP (see Quick Start for basic examples).
-
-#### With Authentication Headers
+HTTP servers connect to remote MCP endpoints over HTTP.
 
 ```json
 {
   "mcpServers": {
-    "authenticated-api": {
+    "remote-api": {
       "type": "http",
       "url": "https://api.example.com/mcp",
       "headers": {
-        "Authorization": "Bearer ${API_TOKEN}",
-        "X-Custom-Header": "value"
+        "Authorization": "Bearer ${API_TOKEN}"
       }
     }
   }
 }
 ```
 
-#### HTTP Configuration Options
-
 | Field | Required | Description |
 |-------|----------|-------------|
-| `type` | Yes | Must be `"http"` for HTTP servers |
+| `type` | Yes | Must be `"http"` |
 | `url` | Yes | Full URL to the MCP endpoint |
-| `headers` | No | HTTP headers to include with requests (supports `${VAR}` syntax) |
+| `headers` | No | HTTP headers (supports `${VAR}` syntax) |
 
-For OAuth-protected servers, see [OAuth Authentication](#oauth-authentication) below.
+For OAuth-protected servers, see [OAuth Authentication](#oauth-authentication).
 
 ### SSE Transport Configuration
 
-Some legacy MCP servers use Server-Sent Events (SSE) instead of the newer Streamable HTTP transport. Configure SSE servers with `type: "sse"`:
+Some legacy MCP servers use Server-Sent Events (SSE) instead of the newer Streamable HTTP transport:
 
 ```json
 {
@@ -316,23 +291,15 @@ Some legacy MCP servers use Server-Sent Events (SSE) instead of the newer Stream
 }
 ```
 
-#### SSE Configuration Options
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `type` | Yes | Must be `"sse"` for SSE servers |
-| `url` | Yes | Full URL to the SSE endpoint |
-| `headers` | No | HTTP headers to include with requests (supports `${VAR}` syntax) |
-
-> **Note:** SSE transport is provided for compatibility with older MCP servers. New servers should use the standard HTTP/Streamable transport.
+> **Note:** SSE transport is provided for compatibility with older MCP servers. New servers should use standard HTTP transport.
 
 ### OAuth Authentication
 
-Some remote MCP servers (like Notion, Figma, and other cloud services) require OAuth authentication before you can access their tools. MCP Launchpad handles this securely using industry-standard OAuth 2.1 with PKCE.
+Some remote MCP servers (like Notion, Figma, and other cloud services) require OAuth authentication. MCP Launchpad handles this securely using OAuth 2.1 with PKCE.
 
 #### Quick Start
 
-When you try to connect to a server that requires authentication, mcpl will prompt you:
+When you connect to a server that requires authentication, mcpl will prompt you:
 
 ```bash
 $ mcpl list notion --refresh
@@ -340,13 +307,13 @@ Server 'notion' requires OAuth authentication.
 Would you like to authenticate now? [Y/n]
 ```
 
-You can also authenticate proactively:
+Or authenticate proactively:
 
 ```bash
 mcpl auth login notion
 ```
 
-This opens your browser for authorization. After you approve, tokens are stored securely and you can use the server's tools.
+This opens your browser for authorization. After you approve, tokens are stored securely.
 
 #### Commands
 
@@ -356,6 +323,40 @@ This opens your browser for authorization. After you approve, tokens are stored 
 | `mcpl auth logout <server>` | Remove stored authentication |
 | `mcpl auth logout --all` | Clear all stored tokens |
 | `mcpl auth status [server]` | Show authentication status |
+
+#### Configuration
+
+For servers that require pre-registered OAuth credentials:
+
+```json
+{
+  "mcpServers": {
+    "notion": {
+      "type": "http",
+      "url": "https://mcp.notion.com/mcp",
+      "oauth_client_id": "${NOTION_CLIENT_ID}",
+      "oauth_client_secret": "${NOTION_CLIENT_SECRET}",
+      "oauth_scopes": ["read", "write"]
+    }
+  }
+}
+```
+
+Tokens are encrypted and stored locally in `~/.cache/mcp-launchpad/oauth/` using your system's keyring.
+
+#### Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| "Server requires OAuth authentication" | Run `mcpl auth login <server>` |
+| Token expired | Run `mcpl auth login <server> --force` |
+| Browser doesn't open | Copy the URL from terminal and open manually |
+| "Invalid client" errors | Check `oauth_client_id` and `oauth_client_secret` |
+| Keyring warnings | Using fallback encryption (still secure) |
+| "Metadata fetch failed" | Configure credentials manually in `mcp.json` |
+
+<details>
+<summary><strong>Advanced: Login Options & Security Details</strong></summary>
 
 #### Login Options
 
@@ -378,26 +379,6 @@ Options:
 - `--client-id TEXT` - Use a specific OAuth client ID
 - `--client-secret-stdin` - Read client secret from stdin
 - `--timeout INTEGER` - Browser callback timeout (default: 120 seconds)
-
-#### Configuration
-
-For servers that require pre-registered OAuth credentials (instead of Dynamic Client Registration), configure them in your `mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "notion": {
-      "type": "http",
-      "url": "https://mcp.notion.com/mcp",
-      "oauth_client_id": "${NOTION_CLIENT_ID}",
-      "oauth_client_secret": "${NOTION_CLIENT_SECRET}",
-      "oauth_scopes": ["read", "write"]
-    }
-  }
-}
-```
-
-Tokens are encrypted and stored locally in `~/.cache/mcp-launchpad/oauth/` using your system's keyring. Expired tokens are refreshed automatically.
 
 #### Client Registration Strategy
 
@@ -427,27 +408,20 @@ MCP Launchpad supports OAuth servers with varying levels of standards compliance
 
 > **Note:** If OS keyring is unavailable, a warning will be displayed and tokens will use fallback encryption.
 
-#### Troubleshooting OAuth
-
-| Issue | Solution |
-|-------|----------|
-| "Server requires OAuth authentication" | Run `mcpl auth login <server>` to authenticate |
-| Token expired or auth stops working | Run `mcpl auth login <server> --force` to re-authenticate |
-| Browser doesn't open | Copy the URL printed in the terminal and open it manually |
-| "Invalid client" errors | Check that `oauth_client_id` and `oauth_client_secret` are correct |
-| Keyring warnings | Tokens are using fallback encryption (still secure, but less robust) |
-| "Metadata fetch failed" errors | Server may not support discovery; configure credentials manually in `mcp.json` |
-| Token validation fails | Check system clock sync; OAuth tokens are time-sensitive |
+</details>
 
 ### Environment Variables
 
-All timeouts, daemon behavior, and session settings can be configured via environment variables.
-
-#### Configuration Settings
+Common settings you may need to configure:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `MCPL_CONFIG_FILES` | (auto) | Comma-separated list of config files to use (overrides discovery and preferences) |
+| `MCPL_CONFIG_FILES` | (auto) | Comma-separated list of config files (overrides discovery) |
+| `MCPL_CONNECTION_TIMEOUT` | `45` | Server connection timeout in seconds |
+| `MCPL_IDLE_TIMEOUT` | `3600` | Daemon idle timeout (0 to disable) |
+
+<details>
+<summary><strong>All Environment Variables</strong></summary>
 
 #### Connection Settings
 
@@ -467,13 +441,13 @@ All timeouts, daemon behavior, and session settings can be configured via enviro
 
 #### IDE/Session Settings
 
-These settings control daemon behavior in IDE environments (VS Code, Claude Code):
-
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MCPL_IDLE_TIMEOUT` | `3600` | Shut down daemon after this many seconds of inactivity (0 to disable) |
 | `MCPL_IDE_ANCHOR_CHECK_INTERVAL` | `10` | How often to check if IDE session is still active (seconds) |
 | `MCPL_SESSION_ID` | (auto) | Override the session ID (for testing or advanced multi-session setups) |
+
+</details>
 
 ## Platform Notes
 
@@ -481,14 +455,7 @@ These settings control daemon behavior in IDE environments (VS Code, Claude Code
 
 Windows support uses named pipes for IPC communication. While functional, it may have limitations compared to Unix sockets on macOS/Linux.
 
-#### Improvements
-
-- **Stable session detection** - Uses working directory hash for reliable session identification
-- **Named pipe IPC** - Full support for daemon communication
-
-#### Troubleshooting
-
-If you encounter issues on Windows:
+If you encounter issues:
 
 1. Use `--no-daemon` flag to bypass the session daemon
 2. Set `MCPL_SESSION_ID` explicitly if session detection is unreliable
@@ -499,11 +466,8 @@ If you encounter issues on Windows:
 Requires Python 3.13+
 
 ```bash
-# Install from source
 git clone https://github.com/kenneth-liao/mcp-launchpad.git
 cd mcp-launchpad
-
-# Install dev dependencies
 uv sync --all-extras
 
 # Run tests
@@ -515,6 +479,18 @@ uv run pytest --cov=mcp_launchpad
 # Type checking
 uv run mypy mcp_launchpad
 ```
+
+## Features
+
+- **Unified Tool Discovery** - Search across all configured MCP servers with BM25, regex, or exact matching
+- **Persistent Connections** - Session daemon maintains server connections for faster repeated calls
+- **HTTP & Stdio Support** - Connect to both local process-based servers and remote HTTP/Streamable MCP servers
+- **SSE Transport Support** - Connect to legacy MCP servers using Server-Sent Events
+- **Multi-Config Management** - Use multiple config files simultaneously with interactive selection
+- **OAuth 2.1 Authentication** - Secure authentication for OAuth-protected MCP servers (Notion, Figma, etc.)
+- **Auto-Configuration** - Reads from `./mcp.json` (project-level) or `~/.claude/mcp.json` (user-level)
+- **Cross-Platform** - Works on macOS, Linux, and Windows (experimental)
+- **JSON Mode** - Machine-readable output for scripting and automation
 
 ## License
 
