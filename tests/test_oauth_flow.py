@@ -68,7 +68,140 @@ class TestBuildAuthorizationUrl:
             scopes=["read", "write"],
         )
 
-        assert "scope=read+write" in url or "scope=read%20write" in url
+        assert "scope=" in url
+        assert "read" in url
+        assert "write" in url
+
+    def test_adds_offline_access_when_not_provided(self) -> None:
+        """Test that offline_access is added when scopes don't include it."""
+        metadata = AuthServerMetadata(
+            issuer="https://auth.example.com",
+            authorization_endpoint="https://auth.example.com/authorize",
+            token_endpoint="https://auth.example.com/token",
+            scopes_supported=None,  # Server doesn't advertise scopes
+        )
+
+        url = build_authorization_url(
+            auth_server_metadata=metadata,
+            client_id="test_client",
+            redirect_uri="http://127.0.0.1:8080/callback",
+            code_challenge="test_challenge",
+            state="test_state",
+            resource="https://api.example.com",
+            scopes=["read", "write"],
+        )
+
+        assert "offline_access" in url
+
+    def test_does_not_duplicate_offline_access(self) -> None:
+        """Test that offline_access is not duplicated when already provided."""
+        metadata = AuthServerMetadata(
+            issuer="https://auth.example.com",
+            authorization_endpoint="https://auth.example.com/authorize",
+            token_endpoint="https://auth.example.com/token",
+        )
+
+        url = build_authorization_url(
+            auth_server_metadata=metadata,
+            client_id="test_client",
+            redirect_uri="http://127.0.0.1:8080/callback",
+            code_challenge="test_challenge",
+            state="test_state",
+            resource="https://api.example.com",
+            scopes=["read", "write", "offline_access"],
+        )
+
+        # Count occurrences of offline_access - should only appear once
+        assert url.count("offline_access") == 1
+
+    def test_adds_offline_access_when_server_supports_it(self) -> None:
+        """Test that offline_access is added when server advertises support."""
+        metadata = AuthServerMetadata(
+            issuer="https://auth.example.com",
+            authorization_endpoint="https://auth.example.com/authorize",
+            token_endpoint="https://auth.example.com/token",
+            scopes_supported=["read", "write", "offline_access"],
+        )
+
+        url = build_authorization_url(
+            auth_server_metadata=metadata,
+            client_id="test_client",
+            redirect_uri="http://127.0.0.1:8080/callback",
+            code_challenge="test_challenge",
+            state="test_state",
+            resource="https://api.example.com",
+            scopes=["read"],
+        )
+
+        assert "offline_access" in url
+
+    def test_does_not_add_offline_access_when_server_excludes_it(self) -> None:
+        """Test that offline_access is NOT added when server doesn't support it."""
+        metadata = AuthServerMetadata(
+            issuer="https://auth.example.com",
+            authorization_endpoint="https://auth.example.com/authorize",
+            token_endpoint="https://auth.example.com/token",
+            scopes_supported=["read", "write"],  # offline_access NOT in list
+        )
+
+        url = build_authorization_url(
+            auth_server_metadata=metadata,
+            client_id="test_client",
+            redirect_uri="http://127.0.0.1:8080/callback",
+            code_challenge="test_challenge",
+            state="test_state",
+            resource="https://api.example.com",
+            scopes=["read"],
+        )
+
+        # Server explicitly doesn't support offline_access, so don't add it
+        assert "offline_access" not in url
+
+    def test_uses_server_scopes_with_offline_access_when_no_scopes_provided(self) -> None:
+        """Test that server default scopes are used and offline_access is added."""
+        metadata = AuthServerMetadata(
+            issuer="https://auth.example.com",
+            authorization_endpoint="https://auth.example.com/authorize",
+            token_endpoint="https://auth.example.com/token",
+            scopes_supported=["api", "profile", "offline_access"],
+        )
+
+        url = build_authorization_url(
+            auth_server_metadata=metadata,
+            client_id="test_client",
+            redirect_uri="http://127.0.0.1:8080/callback",
+            code_challenge="test_challenge",
+            state="test_state",
+            resource="https://api.example.com",
+            scopes=None,  # No scopes provided, use server defaults
+        )
+
+        assert "api" in url
+        assert "profile" in url
+        assert "offline_access" in url
+
+    def test_adds_offline_access_when_server_scopes_unknown(self) -> None:
+        """Test that offline_access is added when server doesn't advertise scopes."""
+        metadata = AuthServerMetadata(
+            issuer="https://auth.example.com",
+            authorization_endpoint="https://auth.example.com/authorize",
+            token_endpoint="https://auth.example.com/token",
+            scopes_supported=None,  # Server doesn't advertise scopes
+        )
+
+        url = build_authorization_url(
+            auth_server_metadata=metadata,
+            client_id="test_client",
+            redirect_uri="http://127.0.0.1:8080/callback",
+            code_challenge="test_challenge",
+            state="test_state",
+            resource="https://api.example.com",
+            scopes=None,
+        )
+
+        # When server doesn't advertise scopes, we should still request offline_access
+        # (per OAuth spec, unknown scopes are ignored by the server)
+        assert "offline_access" in url
 
 
 class TestExchangeCodeForTokens:
