@@ -82,7 +82,9 @@ class ConfigPreferencesManager:
             with open(self.preferences_file) as f:
                 data = json.load(f)
                 self._preferences = ConfigPreferences.from_dict(data)
-        except (json.JSONDecodeError, KeyError, OSError):
+        # A non-object JSON value (a list, string, number or null) raises AttributeError
+        # in from_dict, so fall back to defaults instead of crashing.
+        except (json.JSONDecodeError, KeyError, OSError, AttributeError):
             self._preferences = ConfigPreferences()
 
         return self._preferences

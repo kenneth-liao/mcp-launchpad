@@ -461,3 +461,15 @@ class TestIsInteractive:
         monkeypatch.setattr("sys.stdout.isatty", lambda: False)
 
         assert is_interactive() is False
+
+
+@pytest.mark.parametrize("contents", ["[]", '"text"', "5", "null"])
+def test_load_non_object_json_uses_defaults(tmp_path, contents):
+    """A preferences file holding a non-object JSON value falls back to defaults."""
+    prefs_file = tmp_path / "config_preferences.json"
+    prefs_file.write_text(contents)
+    manager = ConfigPreferencesManager(preferences_file=prefs_file)
+    prefs = manager.load()
+    assert prefs.active_configs == []
+    assert prefs.first_run_completed is False
+
