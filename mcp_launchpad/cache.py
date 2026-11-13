@@ -73,7 +73,9 @@ class ToolCache:
         try:
             with open(self.metadata_path) as f:
                 return CacheMetadata.from_dict(json.load(f))
-        except (json.JSONDecodeError, KeyError):
+        # JSONDecodeError is a ValueError. A bad timestamp raises ValueError, and a
+        # non-object JSON value raises TypeError, so treat all of them as a cache miss.
+        except (ValueError, KeyError, TypeError):
             return None
 
     def _save_metadata(self, metadata: CacheMetadata) -> None:

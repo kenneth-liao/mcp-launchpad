@@ -114,6 +114,19 @@ class TestToolCache:
         metadata = cache_with_temp_dir._load_metadata()
         assert metadata is None
 
+    def test_load_metadata_bad_timestamp(self, cache_with_temp_dir: ToolCache):
+        """A corrupt last_updated value is a cache miss, not a crash."""
+        cache_with_temp_dir.metadata_path.write_text(
+            '{"last_updated": "not-a-date", "config_mtime": 0, "server_update_times": {}}'
+        )
+        assert cache_with_temp_dir._load_metadata() is None
+        assert cache_with_temp_dir.is_cache_valid() is False
+
+    def test_load_metadata_non_object_json(self, cache_with_temp_dir: ToolCache):
+        """Valid JSON that is not an object is a cache miss, not a crash."""
+        cache_with_temp_dir.metadata_path.write_text("[1, 2, 3]")
+        assert cache_with_temp_dir._load_metadata() is None
+
     def test_is_cache_valid_no_metadata(self, cache_with_temp_dir: ToolCache):
         """Test cache validity when no metadata exists."""
         assert cache_with_temp_dir.is_cache_valid() is False
