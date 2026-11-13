@@ -216,7 +216,10 @@ mcpl config files --reset            # Clear preferences (re-prompts on next run
 
 ### `mcpl verify`
 
-Test that all configured servers can connect and respond.
+Test that all enabled servers can connect and respond. Disabled servers are skipped.
+The exit status is `1` if any enabled server fails (including a timeout), or `0`
+if all pass or none are enabled. This also applies to `mcpl --json verify`;
+the verification results are printed before the command exits.
 
 ```bash
 mcpl verify
