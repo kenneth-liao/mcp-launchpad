@@ -18,6 +18,7 @@ from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
+from . import __version__
 from .config import Config, ServerConfig, load_config
 from .connection import (
     REQUEST_TIMEOUT,
@@ -852,6 +853,7 @@ class Daemon:
 
         return {
             "success": True,
+            "version": __version__,
             "parent_pid": self.state.parent_pid,
             "servers": servers,
             "running": self.state.running,

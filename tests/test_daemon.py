@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
+from mcp_launchpad import __version__
 from mcp_launchpad.config import Config, ServerConfig, load_config
 from mcp_launchpad.connection import OAuthRequiredError
 from mcp_launchpad.daemon import Daemon, DaemonState, ServerState
@@ -234,6 +235,7 @@ class TestDaemon:
             status = daemon._get_status()
 
             assert status["success"] is True
+            assert status["version"] == __version__
             assert status["parent_pid"] == 12345
             assert status["running"] is True
             assert status["servers"]["server1"]["connected"] is True

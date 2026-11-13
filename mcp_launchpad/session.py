@@ -8,6 +8,7 @@ import sys
 import time
 from typing import Any
 
+from . import __version__
 from .config import Config
 
 # Logger for session client
@@ -31,6 +32,9 @@ DAEMON_START_TIMEOUT = int(os.environ.get("MCPL_DAEMON_START_TIMEOUT", "30"))
 DAEMON_CONNECT_RETRY_DELAY = float(
     os.environ.get("MCPL_DAEMON_CONNECT_RETRY_DELAY", "0.2")
 )
+
+# How long to wait for an out-of-date daemon to shut down before giving up (seconds)
+STALE_DAEMON_STOP_TIMEOUT = 5.0
 
 
 class SessionClient:
@@ -132,9 +136,22 @@ class SessionClient:
             await writer.wait_closed()
 
     async def _ensure_daemon_running(self) -> None:
-        """Ensure the daemon is running, starting it if necessary."""
-        if await self._is_daemon_running():
-            return
+        """Ensure a daemon running this client's mcpl version is available.
+
+        A daemon started by an older install keeps running old code after an
+        upgrade, so a daemon whose reported version differs from ours (or that
+        reports no version at all) is stopped and replaced.
+        """
+        status = await self._probe_daemon()
+        if status is not None:
+            if status.get("version") == __version__:
+                return
+            logger.info(
+                "Running daemon version %s does not match client version %s; restarting",
+                status.get("version"),
+                __version__,
+            )
+            await self._stop_stale_daemon()
 
         # Clean up any legacy daemon before starting new one
         # This handles migration from old path format (pre-socket-path-fix)
@@ -146,7 +163,8 @@ class SessionClient:
         # Wait for daemon to be ready
         start_time = time.time()
         while time.time() - start_time < DAEMON_START_TIMEOUT:
-            if await self._is_daemon_running():
+            status = await self._probe_daemon()
+            if status is not None and status.get("version") == __version__:
                 return
             await asyncio.sleep(DAEMON_CONNECT_RETRY_DELAY)
 
@@ -189,7 +207,11 @@ class SessionClient:
         raise RuntimeError(error_msg)
 
     async def _is_daemon_running(self) -> bool:
-        """Check if the daemon is currently running and responsive.
+        """Check if the daemon is currently running and responsive."""
+        return await self._probe_daemon() is not None
+
+    async def _probe_daemon(self) -> dict[str, Any] | None:
+        """Return the daemon's status payload if it is running and responsive.
 
         This performs two checks:
         1. PID file exists and process is alive
@@ -207,7 +229,7 @@ class SessionClient:
             # No PID file - clean up any stale socket file
             if socket_path.exists():
                 socket_path.unlink(missing_ok=True)
-            return False
+            return None
 
         try:
             pid = int(pid_file.read_text().strip())
@@ -216,9 +238,9 @@ class SessionClient:
                 pid_file.unlink(missing_ok=True)
                 if socket_path.exists():
                     socket_path.unlink(missing_ok=True)
-                return False
+                return None
         except (ValueError, OSError):
-            return False
+            return None
 
         # Process is alive - now verify it responds to IPC requests.
         # This sends an actual status message rather than just testing connectivity,
@@ -226,7 +248,7 @@ class SessionClient:
         try:
             connection = await asyncio.wait_for(connect_to_daemon(), timeout=2.0)
             if not connection:
-                return False
+                return None
 
             reader, writer = connection
             try:
@@ -234,13 +256,36 @@ class SessionClient:
                 ping_msg = IPCMessage(action="status", payload={})
                 await asyncio.wait_for(write_message(writer, ping_msg), timeout=2.0)
                 response = await asyncio.wait_for(read_message(reader), timeout=2.0)
-                return response is not None and response.action == "result"
+                if response is not None and response.action == "result":
+                    return response.payload
+                return None
             finally:
                 writer.close()
                 await writer.wait_closed()
         except (asyncio.TimeoutError, OSError, Exception) as e:
             logger.debug(f"Daemon ping failed: {e}")
-            return False
+            return None
+
+    async def _stop_stale_daemon(self) -> None:
+        """Shut down a running daemon and wait until it stops responding.
+
+        Raises RuntimeError if the daemon is still responding after
+        STALE_DAEMON_STOP_TIMEOUT, so a new daemon is never started alongside it.
+        """
+        await self.shutdown()
+
+        deadline = time.time() + STALE_DAEMON_STOP_TIMEOUT
+        while time.time() < deadline:
+            if await self._probe_daemon() is None:
+                return
+            await asyncio.sleep(DAEMON_CONNECT_RETRY_DELAY)
+
+        raise RuntimeError(
+            f"Running daemon did not stop within {STALE_DAEMON_STOP_TIMEOUT} seconds\n\n"
+            "Try:\n"
+            "  1. Run 'mcpl session stop' to stop it manually\n"
+            "  2. Retry your command"
+        )
 
     async def _cleanup_legacy_daemon(self) -> None:
         """Clean up any legacy daemon from before path format change.
