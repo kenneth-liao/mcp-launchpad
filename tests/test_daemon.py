@@ -15,6 +15,8 @@ from mcp_launchpad.connection import OAuthRequiredError
 from mcp_launchpad.daemon import Daemon, DaemonState, ServerState
 from mcp_launchpad.ipc import IPCMessage
 
+from .fakes import fake_http_transport, fake_session_class, fake_two_stream_transport
+
 
 @pytest.fixture
 def mock_config():
@@ -950,34 +952,6 @@ class TestDaemonConfigReload:
         assert daemon.state.config_mtime == fixed_mtime
 
 
-class _FakeSession:
-    """Stand-in for mcp.ClientSession with a configurable initialize()."""
-
-    init_delay = 0.0
-
-    def __init__(self, read, write):
-        pass
-
-    async def initialize(self):
-        await asyncio.sleep(self.init_delay)
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc_info):
-        return False
-
-
-@asynccontextmanager
-async def _fake_http_transport(*args, **kwargs):
-    yield MagicMock(), MagicMock(), MagicMock()
-
-
-@asynccontextmanager
-async def _fake_sse_transport(*args, **kwargs):
-    yield MagicMock(), MagicMock()
-
-
 class TestDaemonConnectionTimeoutScope:
     """CONNECTION_TIMEOUT must only bound connection setup, not the connection's lifetime.
 
@@ -1001,7 +975,7 @@ class TestDaemonConnectionTimeoutScope:
             },
             config_path=Path("/tmp/test-config.json"),
         )
-        transport = _fake_http_transport if server_type == "http" else _fake_sse_transport
+        transport = fake_http_transport if server_type == "http" else fake_two_stream_transport
         target = (
             "mcp_launchpad.daemon.streamable_http_client"
             if server_type == "http"
@@ -1012,14 +986,14 @@ class TestDaemonConnectionTimeoutScope:
     @asynccontextmanager
     async def _patched(self, target, transport, init_delay=0.0):
         preflight = MagicMock(status_code=200)
-        session_cls = type("Session", (_FakeSession,), {"init_delay": init_delay})
+        session_cls = fake_session_class(init_delay)
         with (
             patch("mcp_launchpad.daemon.get_parent_pid", return_value=12345),
             patch("mcp_launchpad.daemon.CONNECTION_TIMEOUT", 0.2),
             patch("mcp_launchpad.daemon.MAX_RECONNECT_ATTEMPTS", 1),
             patch.object(httpx.AsyncClient, "post", AsyncMock(return_value=preflight)),
             patch(target, transport),
-            patch("mcp_launchpad.daemon.ClientSession", session_cls),
+            patch("mcp_launchpad.connection.ClientSession", session_cls),
         ):
             yield
 

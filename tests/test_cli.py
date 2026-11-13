@@ -493,3 +493,31 @@ class TestConfigErrors:
             result = runner.invoke(main, ["--config", str(custom_config), "list"])
 
             assert result.exit_code == 0
+
+
+class TestVerifyCommand:
+    """Tests for the verify command."""
+
+    def test_verify_timeout_bounds_unresponsive_server(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch
+    ):
+        """--timeout must bound each server check, including list_tools.
+
+        Regression: verify set MCPL_CONNECTION_TIMEOUT after the module had
+        already read it, so --timeout had no effect, and a server that never
+        answered list_tools could hang verification forever.
+        """
+        import asyncio
+
+        monkeypatch.chdir(tmp_path)
+        config_data = {"mcpServers": {"hung": {"command": "test"}}}
+        (tmp_path / "mcp.json").write_text(json.dumps(config_data))
+
+        async def never_responds(server_name: str):
+            await asyncio.sleep(60)
+
+        with patch("mcp_launchpad.cli.ConnectionManager") as MockManager:
+            MockManager.return_value.list_tools = never_responds
+            result = runner.invoke(main, ["verify", "--timeout", "1"])
+
+        assert "[hung] FAILED - Timed out after 1s" in result.output

@@ -9,6 +9,7 @@ import tempfile
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any, TextIO, cast
 
 import httpx
@@ -50,6 +51,30 @@ class OAuthRequiredError(Exception):
 
 # Connection timeout in seconds (configurable via MCPL_CONNECTION_TIMEOUT env var)
 CONNECTION_TIMEOUT = int(os.environ.get("MCPL_CONNECTION_TIMEOUT", "45"))
+
+# Per-request timeout in seconds for requests made after setup (tool calls,
+# list_tools). Also used as the transport read timeout so long-running tool
+# calls aren't cut off. Configurable via MCPL_REQUEST_TIMEOUT env var.
+REQUEST_TIMEOUT = int(os.environ.get("MCPL_REQUEST_TIMEOUT", "300"))
+
+
+def create_client_session(read: Any, write: Any) -> ClientSession:
+    """Create a ClientSession whose requests are bounded by REQUEST_TIMEOUT."""
+    return ClientSession(
+        read, write, read_timeout_seconds=timedelta(seconds=REQUEST_TIMEOUT)
+    )
+
+
+def end_setup_timeout(setup_timeout: asyncio.Timeout) -> None:
+    """Disable the connection-setup timeout once the session is initialized.
+
+    The setup timeout must not tear down an established connection; requests
+    made afterwards are bounded per-request by REQUEST_TIMEOUT instead. If the
+    deadline already fired in the same loop iteration, leave it alone so the
+    pending cancellation surfaces as a normal TimeoutError.
+    """
+    if not setup_timeout.expired():
+        setup_timeout.reschedule(None)
 
 
 @dataclass
@@ -220,9 +245,12 @@ class ConnectionManager:
         # Create httpx client with headers if provided
         http_client = httpx.AsyncClient(
             headers=headers,
-            timeout=httpx.Timeout(CONNECTION_TIMEOUT, connect=30.0),
+            timeout=httpx.Timeout(
+                CONNECTION_TIMEOUT, connect=30.0, read=REQUEST_TIMEOUT
+            ),
         )
 
+        setup_complete = False
         try:
             async with asyncio.timeout(CONNECTION_TIMEOUT) as setup_timeout:
                 # Preflight check: detect OAuth-requiring servers before full connection
@@ -258,10 +286,10 @@ class ConnectionManager:
                 async with streamable_http_client(
                     url, http_client=http_client, terminate_on_close=False
                 ) as (read, write, _get_session_id):
-                    async with ClientSession(read, write) as session:
+                    async with create_client_session(read, write) as session:
                         await session.initialize()
-                        # Timeout only applies to connection setup, not to tool calls
-                        setup_timeout.reschedule(None)
+                        end_setup_timeout(setup_timeout)
+                        setup_complete = True
                         logger.debug(f"HTTP connection to '{server_name}' initialized")
                         yield session
                         logger.debug(f"HTTP connection to '{server_name}' closing")
@@ -269,6 +297,9 @@ class ConnectionManager:
             # Re-raise OAuth errors without wrapping
             raise
         except TimeoutError as e:
+            if setup_complete:
+                # Not a connection timeout - don't mislabel it as one
+                raise
             raise TimeoutError(
                 f"Connection to '{server_name}' timed out after {CONNECTION_TIMEOUT}s.\n\n"
                 f"The HTTP server may be slow or unresponsive.\n\n"
@@ -332,20 +363,24 @@ class ConnectionManager:
         ) as stderr_tmp:
             # Cast to TextIO for type checker - NamedTemporaryFile in text mode is compatible
             stderr_file = cast(TextIO, stderr_tmp)
+            setup_complete = False
             try:
                 async with asyncio.timeout(CONNECTION_TIMEOUT) as setup_timeout:
                     async with stdio_client(server_params, errlog=stderr_file) as (
                         read,
                         write,
                     ):
-                        async with ClientSession(read, write) as session:
+                        async with create_client_session(read, write) as session:
                             await session.initialize()
-                            # Timeout only applies to server startup, not to tool calls
-                            setup_timeout.reschedule(None)
+                            end_setup_timeout(setup_timeout)
+                            setup_complete = True
                             logger.debug(f"Stdio connection to '{server_name}' initialized")
                             yield session
                             logger.debug(f"Stdio connection to '{server_name}' closing")
             except TimeoutError as e:
+                if setup_complete:
+                    # Not a connection timeout - don't mislabel it as one
+                    raise
                 stderr_tmp.seek(0)
                 stderr_output = stderr_tmp.read()
                 stderr_info = (
@@ -404,22 +439,26 @@ class ConnectionManager:
                 f"    }}\n  }}\n}}"
             )
 
+        setup_complete = False
         try:
             async with asyncio.timeout(CONNECTION_TIMEOUT) as setup_timeout:
                 async with sse_client(
                     url,
                     headers=headers,
                     timeout=30.0,
-                    sse_read_timeout=CONNECTION_TIMEOUT,
+                    sse_read_timeout=REQUEST_TIMEOUT,
                 ) as (read, write):
-                    async with ClientSession(read, write) as session:
+                    async with create_client_session(read, write) as session:
                         await session.initialize()
-                        # Timeout only applies to connection setup, not to tool calls
-                        setup_timeout.reschedule(None)
+                        end_setup_timeout(setup_timeout)
+                        setup_complete = True
                         logger.debug(f"SSE connection to '{server_name}' initialized")
                         yield session
                         logger.debug(f"SSE connection to '{server_name}' closing")
         except TimeoutError as e:
+            if setup_complete:
+                # Not a connection timeout - don't mislabel it as one
+                raise
             raise TimeoutError(
                 f"Connection to '{server_name}' timed out after {CONNECTION_TIMEOUT}s.\n\n"
                 f"The SSE server may be slow or unresponsive.\n\n"

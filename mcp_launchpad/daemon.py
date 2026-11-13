@@ -19,7 +19,12 @@ from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
 from .config import Config, ServerConfig, load_config
-from .connection import OAuthRequiredError
+from .connection import (
+    REQUEST_TIMEOUT,
+    OAuthRequiredError,
+    create_client_session,
+    end_setup_timeout,
+)
 from .ipc import IPCMessage, create_ipc_server
 from .oauth import get_oauth_manager
 from .platform import (
@@ -217,7 +222,9 @@ class Daemon:
             # Create httpx client with headers
             http_client = httpx.AsyncClient(
                 headers=headers,
-                timeout=httpx.Timeout(CONNECTION_TIMEOUT, connect=30.0),
+                timeout=httpx.Timeout(
+                    CONNECTION_TIMEOUT, connect=30.0, read=REQUEST_TIMEOUT
+                ),
             )
             server_state.http_client = http_client
 
@@ -253,11 +260,11 @@ class Daemon:
                     async with streamable_http_client(
                         url, http_client=http_client, terminate_on_close=False
                     ) as (read, write, _get_session_id):
-                        async with ClientSession(read, write) as session:
+                        async with create_client_session(read, write) as session:
                             await session.initialize()
-                            # Timeout only applies to connection setup - disable it so it
-                            # doesn't tear down the connection during the keep-alive loop
-                            setup_timeout.reschedule(None)
+                            # Setup timeout must not tear down the connection during the
+                            # keep-alive loop; requests are bounded by REQUEST_TIMEOUT instead
+                            end_setup_timeout(setup_timeout)
 
                             server_state.session = session
                             server_state.connected = True
@@ -369,13 +376,13 @@ class Daemon:
                         url,
                         headers=headers,
                         timeout=30.0,
-                        sse_read_timeout=CONNECTION_TIMEOUT,
+                        sse_read_timeout=REQUEST_TIMEOUT,
                     ) as (read, write):
-                        async with ClientSession(read, write) as session:
+                        async with create_client_session(read, write) as session:
                             await session.initialize()
-                            # Timeout only applies to connection setup - disable it so it
-                            # doesn't tear down the connection during the keep-alive loop
-                            setup_timeout.reschedule(None)
+                            # Setup timeout must not tear down the connection during the
+                            # keep-alive loop; requests are bounded by REQUEST_TIMEOUT instead
+                            end_setup_timeout(setup_timeout)
 
                             server_state.session = session
                             server_state.connected = True
@@ -479,7 +486,7 @@ class Daemon:
                     read,
                     write,
                 ):
-                    async with ClientSession(read, write) as session:
+                    async with create_client_session(read, write) as session:
                         # Timeout only applies to initialization
                         async with asyncio.timeout(CONNECTION_TIMEOUT):
                             await session.initialize()
