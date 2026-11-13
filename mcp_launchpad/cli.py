@@ -214,7 +214,7 @@ def _display_config_files(
     active_set = {str(p) for p in active}
 
     if output.json_mode:
-        output.print_json({
+        output.success({
             "config_files": [
                 {
                     "path": str(path),

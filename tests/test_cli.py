@@ -495,6 +495,42 @@ class TestConfigErrors:
             assert result.exit_code == 0
 
 
+class TestConfigFilesCommand:
+    """Tests for the 'config files' command."""
+
+    def test_config_files_json(self, runner: CliRunner, tmp_path: Path):
+        """--json config files lists the discovered files as JSON."""
+        active_file = tmp_path / "mcp.json"
+        active_file.write_text(
+            json.dumps({"mcpServers": {"a": {"command": "a"}, "b": {"command": "b"}}})
+        )
+        inactive_file = tmp_path / "backup_mcp.json"
+        inactive_file.write_text(json.dumps({"mcpServers": {"c": {"command": "c"}}}))
+
+        prefs = MagicMock()
+        prefs.get_active_configs.return_value = [active_file]
+
+        with (
+            patch(
+                "mcp_launchpad.cli.discover_all_config_files",
+                return_value=[active_file, inactive_file],
+            ),
+            patch(
+                "mcp_launchpad.cli.get_config_preferences_manager",
+                return_value=prefs,
+            ),
+        ):
+            result = runner.invoke(main, ["--json", "config", "files"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["success"] is True
+        files = payload["data"]["config_files"]
+        assert [f["path"] for f in files] == [str(active_file), str(inactive_file)]
+        assert [f["active"] for f in files] == [True, False]
+        assert [f["server_count"] for f in files] == [2, 1]
+
+
 class TestVerifyCommand:
     """Tests for the verify command."""
 
