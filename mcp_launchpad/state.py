@@ -43,7 +43,10 @@ class ServerState:
                     for s in data.get("disabled_servers", [])
                     if s in self.config.servers
                 }
-        except (json.JSONDecodeError, KeyError):
+        # A corrupt file can parse to a non-object (AttributeError), hold a non-list
+        # disabled_servers value (TypeError), or fail to parse (ValueError). Start with
+        # no disabled servers rather than crashing on startup.
+        except (ValueError, KeyError, TypeError, AttributeError):
             self._disabled_servers = set()
 
     def _save(self) -> None:
