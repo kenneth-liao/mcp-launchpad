@@ -5,7 +5,9 @@ from importlib.metadata import PackageNotFoundError, version
 try:
     __version__ = version("mcp-launchpad")
 except PackageNotFoundError:
-    __version__ = "0.1.0"  # Fallback for development
+    # Not installed (e.g. running from a source checkout without package metadata):
+    # use a version that cannot be mistaken for a release.
+    __version__ = "0.0.0+dev"
 
 __all__ = [
     "__version__",
