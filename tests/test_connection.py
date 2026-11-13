@@ -1,14 +1,25 @@
 """Tests for connection module."""
 
+import asyncio
 import json
 import os
+from contextlib import asynccontextmanager
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
 from mcp_launchpad.config import Config, ServerConfig
-from mcp_launchpad.connection import ConnectionManager, OAuthRequiredError, ToolInfo
+from mcp_launchpad.connection import (
+    REQUEST_TIMEOUT,
+    ConnectionManager,
+    OAuthRequiredError,
+    ToolInfo,
+    end_setup_timeout,
+)
+
+from .fakes import fake_http_transport, fake_session_class, fake_two_stream_transport
 
 
 class TestToolInfo:
@@ -425,3 +436,96 @@ class TestConnectionManagerOAuth:
 
             # Should NOT be an OAuthRequiredError - network errors are passed through
             assert not isinstance(excinfo.value, OAuthRequiredError)
+
+
+class TestConnectionTimeoutScope:
+    """CONNECTION_TIMEOUT must only bound connection setup, not the use of the session.
+
+    Regression: the timeout used to wrap the yielded session, so every --no-daemon tool call
+    running longer than CONNECTION_TIMEOUT failed with "Connection ... timed out".
+    """
+
+    @pytest.fixture(params=["http", "sse", "stdio"])
+    def server(self, request):
+        server_type = request.param
+        if server_type == "stdio":
+            server_config = ServerConfig(name="srv", command="echo", args=[], env={})
+            target, transport = "mcp_launchpad.connection.stdio_client", fake_two_stream_transport
+        else:
+            server_config = ServerConfig(
+                name="srv", server_type=server_type, url="https://example.com/mcp", headers={}
+            )
+            if server_type == "http":
+                target = "mcp_launchpad.connection.streamable_http_client"
+                transport = fake_http_transport
+            else:
+                target, transport = "mcp_launchpad.connection.sse_client", fake_two_stream_transport
+        config = Config(servers={"srv": server_config}, config_path=None, env_path=None)
+        return ConnectionManager(config), target, transport
+
+    @asynccontextmanager
+    async def _patched(self, target, transport, init_delay=0.0):
+        preflight = MagicMock(status_code=200)
+        session_cls = fake_session_class(init_delay)
+        with (
+            patch("mcp_launchpad.connection.CONNECTION_TIMEOUT", 0.2),
+            patch.object(httpx.AsyncClient, "post", AsyncMock(return_value=preflight)),
+            patch(target, transport),
+            patch("mcp_launchpad.connection.ClientSession", session_cls),
+        ):
+            yield
+
+    @pytest.mark.asyncio
+    async def test_session_usable_past_connection_timeout(self, server):
+        manager, target, transport = server
+        async with self._patched(target, transport):
+            async with manager.connect("srv") as session:
+                await asyncio.sleep(0.6)  # a tool call taking 3x CONNECTION_TIMEOUT
+                result = await session.call_tool("slow_tool", {})
+
+        assert result == "ok"
+
+    @pytest.mark.asyncio
+    async def test_slow_initialization_still_times_out(self, server):
+        manager, target, transport = server
+        async with self._patched(target, transport, init_delay=10):
+            with pytest.raises(TimeoutError, match="timed out"):
+                async with manager.connect("srv"):
+                    pass
+
+    @pytest.mark.asyncio
+    async def test_session_requests_bounded_by_request_timeout(self, server):
+        """With the setup timeout disabled, each request needs its own bound."""
+        manager, target, transport = server
+        async with self._patched(target, transport):
+            async with manager.connect("srv") as session:
+                assert session.kwargs["read_timeout_seconds"] == timedelta(
+                    seconds=REQUEST_TIMEOUT
+                )
+
+    @pytest.mark.asyncio
+    async def test_timeout_after_setup_not_reported_as_connection_timeout(
+        self, server
+    ):
+        manager, target, transport = server
+        async with self._patched(target, transport):
+            with pytest.raises(TimeoutError, match="^tool deadline$"):
+                async with manager.connect("srv"):
+                    raise TimeoutError("tool deadline")
+
+
+class TestEndSetupTimeout:
+    """end_setup_timeout must not touch a timeout whose deadline already fired."""
+
+    def test_disables_pending_timeout(self):
+        setup_timeout = MagicMock()
+        setup_timeout.expired.return_value = False
+        end_setup_timeout(setup_timeout)
+        setup_timeout.reschedule.assert_called_once_with(None)
+
+    def test_leaves_expired_timeout_alone(self):
+        # reschedule() on an EXPIRING asyncio.Timeout raises RuntimeError
+        setup_timeout = MagicMock()
+        setup_timeout.expired.return_value = True
+        end_setup_timeout(setup_timeout)
+        setup_timeout.reschedule.assert_not_called()

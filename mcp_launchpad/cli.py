@@ -1439,15 +1439,10 @@ def verify(ctx: click.Context, timeout: int) -> None:
     This is useful for quickly checking that all servers are properly
     configured and responsive.
     """
-    import os
 
     output: OutputHandler = ctx.obj["output"]
     config = get_config(ctx)
     state = ServerState(config)
-
-    # Set timeout via environment for the connection manager
-    old_timeout = os.environ.get("MCPL_CONNECTION_TIMEOUT")
-    os.environ["MCPL_CONNECTION_TIMEOUT"] = str(timeout)
 
     results: list[dict[str, Any]] = []
     all_passed = True
@@ -1459,12 +1454,24 @@ def verify(ctx: click.Context, timeout: int) -> None:
         """Verify a single server by listing its tools."""
         manager = ConnectionManager(config)
         try:
-            tools = await manager.list_tools(server_name)
+            # Bound the whole check (connect + list_tools) per server so one
+            # unresponsive server can't stall verification
+            async with asyncio.timeout(timeout):
+                tools = await manager.list_tools(server_name)
             return {
                 "server": server_name,
                 "status": "ok",
                 "tools": len(tools),
                 "error": None,
+            }
+        except TimeoutError as e:
+            # Our verify timeout fired (empty message), or the connection
+            # manager raised its own descriptive timeout
+            return {
+                "server": server_name,
+                "status": "error",
+                "tools": 0,
+                "error": str(e).split("\n")[0] or f"Timed out after {timeout}s",
             }
         except Exception as e:
             return {
@@ -1500,12 +1507,6 @@ def verify(ctx: click.Context, timeout: int) -> None:
             click.secho(f"  [{server_name}] ", fg="cyan", nl=False)
             click.secho("SKIPPED", dim=True, nl=False)
             click.echo(" (disabled)")
-
-    # Restore original timeout
-    if old_timeout is not None:
-        os.environ["MCPL_CONNECTION_TIMEOUT"] = old_timeout
-    else:
-        os.environ.pop("MCPL_CONNECTION_TIMEOUT", None)
 
     if ctx.obj["json_mode"]:
         output.success(
