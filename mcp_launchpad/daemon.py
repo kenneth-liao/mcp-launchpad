@@ -12,11 +12,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TextIO, cast
 
+import anyio
 import httpx
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared.exceptions import McpError
+from mcp.types import CONNECTION_CLOSED
 
 from .config import Config, ServerConfig, load_config
 from .connection import (
@@ -52,6 +55,18 @@ RECONNECT_DELAY = int(os.environ.get("MCPL_RECONNECT_DELAY", "5"))
 
 # Maximum reconnection attempts before giving up
 MAX_RECONNECT_ATTEMPTS = int(os.environ.get("MCPL_MAX_RECONNECT_ATTEMPTS", "3"))
+
+# Seconds between liveness pings on an established HTTP/SSE session, and how long a
+# ping may take before the session is treated as dead
+KEEPALIVE_INTERVAL = 30
+KEEPALIVE_TIMEOUT = 10
+
+
+def _is_connection_lost(error: BaseException) -> bool:
+    """Return True if the error means the server's transport stream is gone."""
+    if isinstance(error, McpError):
+        return error.error.code == CONNECTION_CLOSED
+    return isinstance(error, (anyio.ClosedResourceError, anyio.BrokenResourceError))
 
 
 def _get_backoff_delay(attempt: int, base_delay: int = RECONNECT_DELAY) -> int:
@@ -178,6 +193,45 @@ class Daemon:
         else:
             await self._connect_stdio_server(server_name, server_config)
 
+    async def _hold_session_open(self, server_state: ServerState) -> None:
+        """Keep an established HTTP/SSE session open until shutdown or until it stops answering.
+
+        Pings the server every KEEPALIVE_INTERVAL seconds. If a ping fails or times out the
+        stream is gone, so this returns and the caller's finally block marks the server
+        disconnected. The next request then starts a fresh connection.
+        """
+        loop = asyncio.get_running_loop()
+        next_ping = loop.time() + KEEPALIVE_INTERVAL
+        while self.state.running:
+            await asyncio.sleep(min(1.0, KEEPALIVE_INTERVAL))
+            if loop.time() < next_ping:
+                continue
+            next_ping = loop.time() + KEEPALIVE_INTERVAL
+            session = server_state.session
+            if session is None:
+                return
+            try:
+                await asyncio.wait_for(session.send_ping(), timeout=KEEPALIVE_TIMEOUT)
+            except Exception as e:
+                logger.warning(
+                    f"Server {server_state.name}: liveness ping failed, "
+                    f"dropping session so the next call reconnects: {e!r}"
+                )
+                return
+
+    async def _drop_session(self, server_name: str, server_state: ServerState) -> None:
+        """Tear down a session whose stream is gone so the next request reconnects.
+
+        Cancels the connection task (which closes the transport) and waits for it to
+        finish. Once it is done, _ensure_server_connected starts a new connection task.
+        """
+        task = self._connection_tasks.get(server_name)
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.wait({task})
+        server_state.connected = False
+        server_state.session = None
+
     async def _connect_http_server(
         self, server_name: str, server_config: ServerConfig
     ) -> None:
@@ -271,11 +325,9 @@ class Daemon:
                             attempt = 0  # Reset on success
                             logger.info(f"Connected to HTTP server: {server_name}")
 
-                            # Keep connection alive until daemon shuts down
-                            while self.state.running:
-                                await asyncio.sleep(1)
-
-                            # Clean exit
+                            # Keep connection alive until daemon shuts down or the
+                            # session stops answering pings
+                            await self._hold_session_open(server_state)
                             return
 
             except OAuthRequiredError as e:
@@ -389,11 +441,9 @@ class Daemon:
                             attempt = 0  # Reset on success
                             logger.info(f"Connected to SSE server: {server_name}")
 
-                            # Keep connection alive until daemon shuts down
-                            while self.state.running:
-                                await asyncio.sleep(1)
-
-                            # Clean exit
+                            # Keep connection alive until daemon shuts down or the
+                            # session stops answering pings
+                            await self._hold_session_open(server_state)
                             return
 
             except TimeoutError:
@@ -769,6 +819,19 @@ class Daemon:
         try:
             result = await server_state.session.call_tool(tool_name, arguments)
         except Exception as e:
+            if _is_connection_lost(e):
+                # The stream is gone: drop the session so the next call reconnects.
+                # The call itself is not retried, since the server may already have run it.
+                await self._drop_session(server_name, server_state)
+                return {
+                    "result": (
+                        f"Connection to server '{server_name}' was lost ({e}). "
+                        "It will reconnect on the next call."
+                    ),
+                    "error": True,
+                    "error_type": "connection_lost",
+                }
+
             # Handle MCP protocol errors (JSON-RPC errors)
             error_str = str(e)
 

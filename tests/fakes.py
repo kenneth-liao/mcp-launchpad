@@ -14,6 +14,7 @@ class FakeSession:
     def __init__(self, read: Any, write: Any, **kwargs: Any) -> None:
         self.kwargs = kwargs
         self.call_tool = AsyncMock(return_value="ok")
+        self.send_ping = AsyncMock(return_value=None)
 
     async def initialize(self) -> None:
         await asyncio.sleep(self.init_delay)

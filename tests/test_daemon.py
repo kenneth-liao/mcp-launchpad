@@ -7,12 +7,15 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import anyio
 import httpx
 import pytest
+from mcp.shared.exceptions import McpError
+from mcp.types import CONNECTION_CLOSED, ErrorData
 
 from mcp_launchpad.config import Config, ServerConfig, load_config
 from mcp_launchpad.connection import OAuthRequiredError
-from mcp_launchpad.daemon import Daemon, DaemonState, ServerState
+from mcp_launchpad.daemon import Daemon, DaemonState, ServerState, _is_connection_lost
 from mcp_launchpad.ipc import IPCMessage
 
 from .fakes import fake_http_transport, fake_session_class, fake_two_stream_transport
@@ -1025,3 +1028,128 @@ class TestDaemonConnectionTimeoutScope:
         server_state = daemon.state.servers["remote"]
         assert server_state.connected is False
         assert "timed out" in server_state.error.lower()
+
+
+async def _wait_until_connected(daemon: Daemon, server_name: str) -> ServerState:
+    for _ in range(300):
+        server_state = daemon.state.servers.get(server_name)
+        if server_state and server_state.connected and server_state.session:
+            return server_state
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"{server_name} never connected")
+
+
+class TestDaemonDeadSessionRecovery:
+    """A session whose transport stream dropped must not stay marked connected.
+
+    Regression: the keep-alive loop only slept, so an HTTP/SSE session whose stream closed
+    stayed marked connected. Every later call then failed on the dead stream until the
+    daemon was restarted.
+    """
+
+    @pytest.fixture(params=["http", "sse"])
+    def remote_server(self, request):
+        server_type = request.param
+        config = Config(
+            servers={
+                "remote": ServerConfig(
+                    name="remote",
+                    server_type=server_type,
+                    url="https://example.com/mcp",
+                    headers={},
+                ),
+            },
+            config_path=Path("/tmp/test-config.json"),
+        )
+        transport = fake_http_transport if server_type == "http" else fake_two_stream_transport
+        target = (
+            "mcp_launchpad.daemon.streamable_http_client"
+            if server_type == "http"
+            else "mcp_launchpad.daemon.sse_client"
+        )
+        return config, target, transport
+
+    @asynccontextmanager
+    async def _patched(self, target, transport):
+        preflight = MagicMock(status_code=200)
+        with (
+            patch("mcp_launchpad.daemon.get_parent_pid", return_value=12345),
+            patch("mcp_launchpad.daemon.CONNECTION_TIMEOUT", 0.2),
+            patch("mcp_launchpad.daemon.MAX_RECONNECT_ATTEMPTS", 1),
+            patch("mcp_launchpad.daemon.KEEPALIVE_INTERVAL", 0.05),
+            patch.object(httpx.AsyncClient, "post", AsyncMock(return_value=preflight)),
+            patch(target, transport),
+            patch("mcp_launchpad.connection.ClientSession", fake_session_class()),
+        ):
+            yield
+
+    @pytest.mark.asyncio
+    async def test_failed_keepalive_ping_drops_session(self, remote_server):
+        config, target, transport = remote_server
+        async with self._patched(target, transport):
+            daemon = Daemon(config)
+            daemon.state.running = True
+            task = asyncio.create_task(daemon._connect_server("remote"))
+            try:
+                server_state = await _wait_until_connected(daemon, "remote")
+                # The transport stream has closed underneath the session
+                server_state.session.send_ping.side_effect = anyio.ClosedResourceError()
+
+                # The connection task must end instead of holding the dead session open
+                await asyncio.wait_for(task, timeout=3)
+            finally:
+                daemon.state.running = False
+                await asyncio.wait_for(task, timeout=3)
+
+        assert server_state.connected is False
+        assert server_state.session is None
+        assert server_state.error is None
+
+    @pytest.mark.asyncio
+    async def test_lost_stream_on_call_reports_error_and_reconnects(self, remote_server):
+        config, target, transport = remote_server
+        async with self._patched(target, transport):
+            daemon = Daemon(config)
+            daemon.state.running = True
+            daemon._connection_tasks["remote"] = asyncio.create_task(
+                daemon._connect_server("remote")
+            )
+            try:
+                old_state = await _wait_until_connected(daemon, "remote")
+                old_session = old_state.session
+                old_session.call_tool.side_effect = McpError(
+                    ErrorData(code=CONNECTION_CLOSED, message="Connection closed")
+                )
+
+                response = await daemon._call_tool("remote", "anything", {})
+
+                assert response["error"] is True
+                assert response["error_type"] == "connection_lost"
+                assert old_state.connected is False
+                assert old_state.session is None
+                assert daemon._connection_tasks["remote"].done()
+
+                # The next request starts a fresh connection and succeeds
+                new_state = await daemon._ensure_server_connected("remote")
+                assert new_state.connected is True
+                assert new_state.session is not None
+                assert new_state.session is not old_session
+            finally:
+                daemon.state.running = False
+                await asyncio.wait_for(daemon._connection_tasks["remote"], timeout=3)
+
+
+class TestIsConnectionLost:
+    """Only errors that mean the transport is gone should drop a session."""
+
+    def test_connection_closed_mcp_error(self):
+        error = McpError(ErrorData(code=CONNECTION_CLOSED, message="Connection closed"))
+        assert _is_connection_lost(error) is True
+
+    def test_closed_stream_errors(self):
+        assert _is_connection_lost(anyio.ClosedResourceError()) is True
+        assert _is_connection_lost(anyio.BrokenResourceError()) is True
+
+    def test_tool_level_errors_keep_session(self):
+        assert _is_connection_lost(McpError(ErrorData(code=-32602, message="bad params"))) is False
+        assert _is_connection_lost(RuntimeError("boom")) is False
