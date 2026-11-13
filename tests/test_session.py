@@ -364,3 +364,113 @@ class TestLegacyDaemonCleanup:
 
                         # Cleanup should have been called
                         mock_cleanup.assert_called_once()
+
+
+class TestDaemonVersionMismatch:
+    """A daemon from a different mcpl version must be replaced, not reused (issue #36)."""
+
+    @pytest.mark.asyncio
+    async def test_matching_version_is_reused(self, mock_config):
+        """A daemon reporting this client's version is used as-is."""
+        from mcp_launchpad import __version__
+
+        client = SessionClient(mock_config)
+
+        with patch.object(
+            client, "_probe_daemon", new_callable=AsyncMock,
+            return_value={"version": __version__},
+        ):
+            with patch.object(client, "shutdown", new_callable=AsyncMock) as mock_shutdown:
+                with patch.object(client, "_start_daemon", new_callable=AsyncMock) as mock_start:
+                    await client._ensure_daemon_running()
+
+                    mock_shutdown.assert_not_called()
+                    mock_start.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_older_version_is_stopped_and_restarted(self, mock_config):
+        """A daemon reporting a different version is shut down and replaced."""
+        from mcp_launchpad import __version__
+
+        client = SessionClient(mock_config)
+
+        # Probe sequence: old daemon responds, then it stops, then the new one comes up
+        probes = [{"version": "0.0.1-old"}, None, {"version": __version__}]
+
+        with patch.object(client, "_probe_daemon", new_callable=AsyncMock, side_effect=probes):
+            with patch.object(client, "shutdown", new_callable=AsyncMock) as mock_shutdown:
+                with patch.object(client, "_cleanup_legacy_daemon", new_callable=AsyncMock):
+                    with patch.object(
+                        client, "_start_daemon", new_callable=AsyncMock
+                    ) as mock_start:
+                        await client._ensure_daemon_running()
+
+                        mock_shutdown.assert_called_once()
+                        mock_start.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_daemon_without_version_is_treated_as_stale(self, mock_config):
+        """A pre-fix daemon reports no version and is replaced."""
+        from mcp_launchpad import __version__
+
+        client = SessionClient(mock_config)
+
+        probes = [{"success": True}, None, {"version": __version__}]
+
+        with patch.object(client, "_probe_daemon", new_callable=AsyncMock, side_effect=probes):
+            with patch.object(client, "shutdown", new_callable=AsyncMock) as mock_shutdown:
+                with patch.object(client, "_cleanup_legacy_daemon", new_callable=AsyncMock):
+                    with patch.object(
+                        client, "_start_daemon", new_callable=AsyncMock
+                    ) as mock_start:
+                        await client._ensure_daemon_running()
+
+                        mock_shutdown.assert_called_once()
+                        mock_start.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_no_new_daemon_started_while_stale_one_still_runs(self, mock_config):
+        """If the old daemon does not stop, raise instead of starting a second one."""
+        client = SessionClient(mock_config)
+
+        with patch.object(
+            client, "_probe_daemon", new_callable=AsyncMock,
+            return_value={"version": "0.0.1-old"},
+        ):
+            with patch.object(client, "shutdown", new_callable=AsyncMock):
+                with patch.object(client, "_start_daemon", new_callable=AsyncMock) as mock_start:
+                    with patch("mcp_launchpad.session.STALE_DAEMON_STOP_TIMEOUT", 0.05):
+                        with pytest.raises(RuntimeError, match="did not stop"):
+                            await client._ensure_daemon_running()
+
+                        mock_start.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_probe_returns_status_payload(self, mock_config):
+        """_probe_daemon returns the status payload, including the version."""
+        client = SessionClient(mock_config)
+
+        response = IPCMessage(action="result", payload={"version": "1.2.3"})
+        pid_file = MagicMock()
+        pid_file.exists.return_value = True
+        pid_file.read_text.return_value = "4242"
+
+        writer = MagicMock()
+        writer.close = MagicMock()
+        writer.wait_closed = AsyncMock()
+
+        with patch("mcp_launchpad.session.get_pid_file_path", return_value=pid_file):
+            with patch("mcp_launchpad.session.is_process_alive", return_value=True):
+                with patch(
+                    "mcp_launchpad.session.connect_to_daemon", new_callable=AsyncMock,
+                    return_value=(AsyncMock(), writer),
+                ):
+                    with patch("mcp_launchpad.session.write_message", new_callable=AsyncMock):
+                        with patch(
+                            "mcp_launchpad.session.read_message",
+                            new_callable=AsyncMock,
+                            return_value=response,
+                        ):
+                            status = await client._probe_daemon()
+
+        assert status == {"version": "1.2.3"}
