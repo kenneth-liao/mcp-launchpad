@@ -495,6 +495,44 @@ class TestConfigErrors:
             assert result.exit_code == 0
 
 
+class TestConfigFilesCommand:
+    """Config discovery should work with both output formats."""
+
+    @pytest.mark.parametrize("json_mode", [False, True])
+    def test_lists_active_and_inactive_configs(self, runner, tmp_path, monkeypatch, json_mode):
+        from mcp_launchpad.config_preferences import ConfigPreferencesManager
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("MCPL_CONFIG_FILES", raising=False)
+        monkeypatch.setattr("mcp_launchpad.config.CONFIG_SEARCH_DIRS", [tmp_path])
+        first = tmp_path / "mcp.json"
+        second = tmp_path / "extra_mcp.json"
+        first.write_text(json.dumps({"mcpServers": {"first": {"command": "test"}}}))
+        second.write_text(json.dumps({"mcpServers": {"second": {"command": "test"}}}))
+        prefs = ConfigPreferencesManager(tmp_path / "preferences.json")
+        prefs.set_active_configs([first])
+
+        with patch("mcp_launchpad.cli.get_config_preferences_manager", return_value=prefs):
+            result = runner.invoke(main, [*(["--json"] if json_mode else []), "config", "files"])
+
+        assert result.exit_code == 0, result.output
+        if json_mode:
+            payload = json.loads(result.output)
+            assert payload["success"] is True
+            files = {entry["path"]: entry for entry in payload["data"]["config_files"]}
+            assert set(files) == {str(first), str(second)}
+            assert files[str(first)]["active"] is True
+            assert files[str(second)]["active"] is False
+            assert all(entry["server_count"] == 1 for entry in files.values())
+            assert all(entry["display_path"] for entry in files.values())
+        else:
+            assert "Config Files:" in result.output
+            assert "ACTIVE" in result.output
+            assert "INACTIVE" in result.output
+            assert str(first) in result.output
+            assert str(second) in result.output
+
+
 class TestVerifyCommand:
     """Tests for the verify command."""
 

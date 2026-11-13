@@ -157,6 +157,8 @@ class ToolCache:
 
         # When refreshing a subset of servers, preserve existing cached tools
         # for servers NOT in the refresh list
+        all_tools: list[ToolInfo]
+        server_times: dict[str, str]
         if servers is not None:
             existing_tools = self._load_tools()
             all_tools = [t for t in existing_tools if t.server not in servers_to_refresh]
@@ -164,8 +166,8 @@ class ToolCache:
             existing_metadata = self._load_metadata()
             server_times = existing_metadata.server_update_times.copy() if existing_metadata else {}
         else:
-            all_tools: list[ToolInfo] = []
-            server_times: dict[str, str] = {}
+            all_tools = []
+            server_times = {}
 
         for server_name in servers_to_refresh:
             if on_progress:
