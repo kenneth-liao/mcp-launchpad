@@ -1,11 +1,14 @@
 [project]
 name = "mcp-launchpad"
-version = "0.1.2"
+version = "0.1.3"
 description = "A lightweight CLI for efficiently discovering and executing MCP server tools"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "mcp>=1.0.0",
+    # mcp 2.x changed the streamable_http_client API and dropped httpx;
+    # pin to 1.x until we migrate (see PRs #29/#30).
+    "mcp>=1.0.0,<2.0.0",
+    "httpx>=0.27.0",
     "click>=8.1.0",
     "rank-bm25>=0.2.2",
     "python-dotenv>=1.0.0",
