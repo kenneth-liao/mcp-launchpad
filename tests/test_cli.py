@@ -498,8 +498,73 @@ class TestConfigErrors:
 class TestVerifyCommand:
     """Tests for the verify command."""
 
+    @pytest.mark.parametrize("json_mode", [False, True])
+    @pytest.mark.parametrize(
+        ("failed_servers", "disabled_servers", "exit_code", "passed", "failed"),
+        [
+            ([], [], 0, 2, 0),
+            (["first"], [], 1, 1, 1),
+            (["second"], [], 1, 1, 1),
+            (["first", "second"], [], 1, 0, 2),
+            (["second"], ["second"], 0, 1, 0),
+            (["first", "second"], ["first", "second"], 0, 0, 0),
+        ],
+    )
+    def test_verify_exit_status(
+        self,
+        runner,
+        tmp_path,
+        monkeypatch,
+        json_mode,
+        failed_servers,
+        disabled_servers,
+        exit_code,
+        passed,
+        failed,
+    ):
+        """Failures affect the exit status after all enabled servers are checked."""
+        monkeypatch.chdir(tmp_path)
+        config_path = tmp_path / "mcp.json"
+        config_path.write_text(
+            json.dumps(
+                {"mcpServers": {name: {"command": "test"} for name in ("first", "second")}}
+            )
+        )
+        state_path = tmp_path / "server_state.json"
+        state_path.write_text(json.dumps({"disabled_servers": disabled_servers}))
+        monkeypatch.setattr("mcp_launchpad.state.STATE_FILE", state_path)
+        checked = []
+
+        async def list_tools(server_name):
+            checked.append(server_name)
+            if server_name in failed_servers:
+                raise RuntimeError("Server unavailable")
+            return []
+
+        args = ["--config", str(config_path)]
+        if json_mode:
+            args.append("--json")
+        with patch("mcp_launchpad.cli.ConnectionManager") as manager:
+            manager.return_value.list_tools = list_tools
+            result = runner.invoke(main, [*args, "verify"])
+
+        assert result.exit_code == exit_code
+        assert checked == [name for name in ("first", "second") if name not in disabled_servers]
+        if json_mode:
+            data = json.loads(result.output)["data"]
+            assert data["all_passed"] is (failed == 0)
+            assert data["total"] == passed + failed
+            assert data["passed"] == passed
+            assert data["failed"] == failed
+            assert [r["server"] for r in data["results"]] == checked
+        elif failed:
+            assert f"Verification complete: {passed} passed, {failed} failed." in result.output
+        else:
+            assert f"All {passed} servers verified successfully." in result.output
+
+    @pytest.mark.parametrize("json_mode", [False, True])
     def test_verify_timeout_bounds_unresponsive_server(
-        self, runner: CliRunner, tmp_path: Path, monkeypatch
+        self, runner: CliRunner, tmp_path: Path, monkeypatch, json_mode
     ):
         """--timeout must bound each server check, including list_tools.
 
@@ -518,6 +583,13 @@ class TestVerifyCommand:
 
         with patch("mcp_launchpad.cli.ConnectionManager") as MockManager:
             MockManager.return_value.list_tools = never_responds
-            result = runner.invoke(main, ["verify", "--timeout", "1"])
+            args = ["--json"] if json_mode else []
+            result = runner.invoke(main, [*args, "verify", "--timeout", "1"])
 
-        assert "[hung] FAILED - Timed out after 1s" in result.output
+        assert result.exit_code == 1
+        if json_mode:
+            data = json.loads(result.output)["data"]
+            assert data["all_passed"] is False
+            assert data["results"][0]["error"] == "Timed out after 1s"
+        else:
+            assert "[hung] FAILED - Timed out after 1s" in result.output

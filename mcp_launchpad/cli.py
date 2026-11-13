@@ -1438,6 +1438,9 @@ def verify(ctx: click.Context, timeout: int) -> None:
     Tests each configured server by connecting and listing its tools.
     This is useful for quickly checking that all servers are properly
     configured and responsive.
+
+    Exits with status 1 if any enabled server fails, or 0 if all pass.
+    Disabled servers are skipped. This also applies to --json output.
     """
 
     output: OutputHandler = ctx.obj["output"]
@@ -1534,6 +1537,9 @@ def verify(ctx: click.Context, timeout: int) -> None:
             for r in results:
                 if r["status"] != "ok":
                     click.echo(f"  mcpl list {r['server']} --refresh")
+
+    if not all_passed:
+        ctx.exit(1)
 
 
 @main.group(name="config", invoke_without_command=True)
