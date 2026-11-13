@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
+from mcp_launchpad import __version__
 from mcp_launchpad.config import Config, ServerConfig
 from mcp_launchpad.connection import (
     REQUEST_TIMEOUT,
@@ -393,6 +394,26 @@ class TestConnectionManagerOAuth:
             assert error.server_name == "oauth-server"
             assert "https://api.example.com/mcp" in error.url
             assert error.www_authenticate == 'Bearer realm="api"'
+
+    async def test_preflight_client_info_reports_package_version(
+        self, http_server_config: Config
+    ):
+        """The preflight initialize request names the installed mcpl version."""
+        manager = ConnectionManager(http_server_config)
+
+        mock_response = MagicMock()
+        mock_response.status_code = 401
+        mock_response.headers = {}
+
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = mock_response
+
+            with pytest.raises(OAuthRequiredError):
+                async with manager.connect("oauth-server"):
+                    pass
+
+        client_info = mock_post.call_args.kwargs["json"]["params"]["clientInfo"]
+        assert client_info == {"name": "mcpl", "version": __version__}
 
     async def test_connect_non_401_proceeds_normally(
         self, http_server_config: Config

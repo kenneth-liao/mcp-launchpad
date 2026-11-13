@@ -20,6 +20,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 from .config import Config, ServerConfig, load_config
 from .connection import (
+    CLIENT_INFO,
     REQUEST_TIMEOUT,
     OAuthRequiredError,
     create_client_session,
@@ -245,7 +246,7 @@ class Daemon:
                                 "params": {
                                     "protocolVersion": "2024-11-05",
                                     "capabilities": {},
-                                    "clientInfo": {"name": "mcpl", "version": "0.1.0"},
+                                    "clientInfo": CLIENT_INFO,
                                 },
                             },
                         )

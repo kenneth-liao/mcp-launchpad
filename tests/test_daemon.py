@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
+from mcp_launchpad import __version__
 from mcp_launchpad.config import Config, ServerConfig, load_config
 from mcp_launchpad.connection import OAuthRequiredError
 from mcp_launchpad.daemon import Daemon, DaemonState, ServerState
@@ -503,6 +504,27 @@ class TestDaemonOAuthHandling:
             },
             config_path=Path("/tmp/test-config.json"),
         )
+
+    @pytest.mark.asyncio
+    async def test_preflight_client_info_reports_package_version(self, http_server_config):
+        """The daemon's preflight initialize request names the installed mcpl version."""
+        with patch("mcp_launchpad.daemon.get_parent_pid", return_value=12345):
+            daemon = Daemon(http_server_config)
+            daemon.state.running = True
+
+            mock_response = MagicMock()
+            mock_response.status_code = 401
+            mock_response.headers = {}
+
+            with patch.object(
+                httpx.AsyncClient, "post", new_callable=AsyncMock
+            ) as mock_post:
+                mock_post.return_value = mock_response
+
+                await daemon._connect_server("oauth-server")
+
+        client_info = mock_post.call_args.kwargs["json"]["params"]["clientInfo"]
+        assert client_info == {"name": "mcpl", "version": __version__}
 
     @pytest.mark.asyncio
     async def test_oauth_required_no_retry(self, http_server_config):

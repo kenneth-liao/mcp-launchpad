@@ -19,6 +19,7 @@ from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import Tool
 
+from . import __version__
 from .config import Config, ServerConfig
 from .oauth import get_oauth_manager
 
@@ -48,6 +49,10 @@ class OAuthRequiredError(Exception):
             f"agents can use mcpl until tokens expire (typically weeks/months)."
         )
         super().__init__(message)
+
+# clientInfo sent in the OAuth preflight `initialize` request, so servers that log or
+# filter on it can tell mcpl releases apart.
+CLIENT_INFO = {"name": "mcpl", "version": __version__}
 
 # Connection timeout in seconds (configurable via MCPL_CONNECTION_TIMEOUT env var)
 CONNECTION_TIMEOUT = int(os.environ.get("MCPL_CONNECTION_TIMEOUT", "45"))
@@ -268,7 +273,7 @@ class ConnectionManager:
                             "params": {
                                 "protocolVersion": "2024-11-05",
                                 "capabilities": {},
-                                "clientInfo": {"name": "mcpl", "version": "0.1.0"},
+                                "clientInfo": CLIENT_INFO,
                             },
                         },
                     )
