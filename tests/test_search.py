@@ -55,6 +55,12 @@ class TestTokenize:
         tokens = tokenize("issue123 v2 test")
         assert tokens == ["issue123", "v2", "test"]
 
+    def test_non_ascii_letters_are_kept(self):
+        """Non-ASCII words must not be cut apart at accented or non-Latin letters."""
+        assert tokenize("Créer un problème") == ["créer", "un", "problème"]
+        assert tokenize("получить данные") == ["получить", "данные"]
+        assert tokenize("搜索 工具") == ["搜索", "工具"]
+
 
 class TestBuildSearchText:
     """Tests for build_search_text function."""

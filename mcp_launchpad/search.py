@@ -38,10 +38,10 @@ class SearchResult:
 
 def tokenize(text: str) -> list[str]:
     """Tokenize text for BM25 indexing."""
-    # Convert to lowercase and split on non-alphanumeric characters
+    # Convert to lowercase and split on anything that is not a letter or digit.
+    # Unicode-aware, so non-ASCII words (e.g. "café", "данные") are kept intact.
     text = text.lower()
-    # Split on underscores, hyphens, spaces, and other non-alphanumeric
-    tokens = re.split(r"[^a-z0-9]+", text)
+    tokens = re.split(r"[\W_]+", text)
     return [t for t in tokens if t]
 
 
